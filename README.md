@@ -4,7 +4,7 @@ Complete personal configuration repository for **Omarchy Quattro (v4.0.0+)** on 
 
 ---
 
-## 📁 Repository Overview
+## Repository Overview
 
 This repository captures all user customizations structured strictly according to Omarchy Quattro standards:
 
@@ -35,7 +35,7 @@ This repository captures all user customizations structured strictly according t
 
 ---
 
-## 🚀 Installation on Another Omarchy Machine
+## Installation on Another Omarchy Machine
 
 ### 1. Clone the repository
 ```bash
@@ -57,7 +57,7 @@ cd ~/dotfiles
 
 ---
 
-## 🔒 Security & Omarchy Update Safety
+## Security & Omarchy Update Safety
 * **Zero System Touches**: All configs live strictly in `$HOME/.config/` and `$HOME/.local/`.
 * **Update Safe**: Running `omarchy update` on Omarchy Quattro will never overwrite your personal configurations.
 * **No Secrets Committed**: API tokens, credentials, and private keys are excluded and stored in standard local state paths (`~/.local/state/`).

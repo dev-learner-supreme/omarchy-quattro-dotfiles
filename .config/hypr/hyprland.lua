@@ -31,4 +31,9 @@ o.window("class:^(Emulator)$", { float = true, tag = "-default-opacity", opacity
 o.window("class:^(qemu-system-.*)$", { float = true, tag = "-default-opacity", opacity = "1 1" })
 
 -- Added by hyprmoncfg: its generated monitor rules load last, so nothing before this can override the applied layout.
-dofile(os.getenv("HOME") .. "/.config/hypr/hyprmoncfg-monitors.lua")
+local hyprmoncfg_file = os.getenv("HOME") .. "/.config/hypr/hyprmoncfg-monitors.lua"
+local f = io.open(hyprmoncfg_file, "r")
+if f then
+  f:close()
+  dofile(hyprmoncfg_file)
+end

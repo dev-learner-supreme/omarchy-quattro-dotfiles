@@ -1,11 +1,5 @@
 # Omarchy Quattro Personal Dotfiles & Configurations
 
-Complete personal configuration repository for **Omarchy Quattro (v4.0.0+)** on Arch Linux.
-
----
-
-## Repository Overview
-
 This repository captures all user customizations structured strictly according to Omarchy Quattro standards:
 
 * **Hyprland Window Manager (`.config/hypr/`)**:
@@ -16,7 +10,7 @@ This repository captures all user customizations structured strictly according t
     * `SUPER + SHIFT + S` → Screen capture.
   * Window rules for Android Emulator / QEMU floating & full opacity.
   * Input & Look'n'Feel personal overrides.
-* **Omarchy Shell & Plugins (`.config/omarchy/`)**:
+* **Omarchy Shell & Plugins (`.config/omarchy/`) (Optional)**:
   * Full top bar layout & widget configurations (`shell.json`).
   * Custom themes (`awsm-changi`, `luminous`, `sora-koi`).
   * Menu extensions (`omarchy-menu.jsonc`).
@@ -61,3 +55,9 @@ cd ~/dotfiles
 * **Zero System Touches**: All configs live strictly in `$HOME/.config/` and `$HOME/.local/`.
 * **Update Safe**: Running `omarchy update` on Omarchy Quattro will never overwrite your personal configurations.
 * **No Secrets Committed**: API tokens, credentials, and private keys are excluded and stored in standard local state paths (`~/.local/state/`).
+
+---
+
+## Devices in use:
+* **Acer sfg14-71**: The main work laptop.
+* **Headless Realme Slimbook**: The converted at home PC.

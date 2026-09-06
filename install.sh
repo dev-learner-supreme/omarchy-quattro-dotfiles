@@ -19,6 +19,14 @@
 # ==============================================================================
 set -euo pipefail
 
+# Ensure script is run as normal user, not via sudo/root
+if [[ $EUID -eq 0 ]]; then
+  echo -e "\e[31mError: Do not run this script with sudo or as root!\e[0m" >&2
+  echo -e "\e[33mPlease run it as your regular user: ./install.sh\e[0m" >&2
+  echo -e "The script will prompt for sudo when elevated permissions are needed." >&2
+  exit 1
+fi
+
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_DIR="$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)"
 ASSUME_YES=0
@@ -87,8 +95,14 @@ if omarchy-pkg-missing ghostty; then
 else
   info "Ghostty terminal is already installed."
   # Ensure ghostty is set as the default in xdg-terminals.list if missing
+  mkdir -p "$HOME/.config"
   if [[ ! -f "$HOME/.config/xdg-terminals.list" ]] || ! grep -q "ghostty" "$HOME/.config/xdg-terminals.list" 2>/dev/null; then
-    omarchy install terminal ghostty 2>/dev/null || true
+    cat > "$HOME/.config/xdg-terminals.list" <<'EOF'
+# Terminal emulator preference order for xdg-terminal-exec
+# The first found and valid terminal will be used
+com.mitchellh.ghostty.desktop
+EOF
+    info "Configured Ghostty as default in xdg-terminals.list."
   fi
 fi
 
@@ -226,9 +240,24 @@ if omarchy-hw-fingerprint; then
     setup_pam_integration
   fi
 
+  CURRENT_USER="${USER:-$(id -un)}"
+
+  # On Match-on-Chip sensors, templates are stored in hardware NVRAM.
+  # If root previously enrolled a finger (e.g. from running with sudo),
+  # enrolling the same finger for the regular user will fail with enroll-duplicate.
+  if sudo fprintd-list root 2>/dev/null | grep -q -E "^ +- #[0-9]+"; then
+    echo
+    warn "Enrolled fingerprint(s) found under user 'root' on Match-on-Chip sensor."
+    warn "This will cause 'enroll-duplicate' errors when enrolling for '$CURRENT_USER'."
+    if confirm "Remove root's enrolled fingerprint(s) so '$CURRENT_USER' can enroll?" true; then
+      sudo fprintd-delete root || true
+      info "Deleted root fingerprint enrollment."
+    fi
+  fi
+
   # Check if fingerprint enrollment is complete
-  if command -v fprintd-list &>/dev/null && fprintd-list "$USER" 2>/dev/null | grep -q "right-index-finger"; then
-    info "Fingerprint already enrolled and PAM configured for $USER."
+  if command -v fprintd-list &>/dev/null && fprintd-list "$CURRENT_USER" 2>/dev/null | grep -q "right-index-finger"; then
+    info "Fingerprint already enrolled and PAM configured for $CURRENT_USER."
   else
     echo
     if (( ASSUME_YES )); then
@@ -292,12 +321,6 @@ sync_item() {
 
   mkdir -p "$(dirname "$dest")"
 
-  # Back up existing non-symlink files before overwriting
-  if [[ -f "$dest" && ! -L "$dest" ]]; then
-    mkdir -p "$(dirname "$BACKUP_DIR/${dest#$HOME/}")"
-    cp -a "$dest" "$BACKUP_DIR/${dest#$HOME/}"
-  fi
-
   if [[ -d "$src" ]]; then
     mkdir -p "$dest"
     local item
@@ -306,6 +329,17 @@ sync_item() {
       sync_item "$item" "$dest/$(basename "$item")"
     done
   else
+    # Skip if file already exists and is identical
+    if [[ -f "$dest" ]] && cmp -s "$src" "$dest" 2>/dev/null; then
+      return 0
+    fi
+
+    # Back up existing non-symlink file before overwriting
+    if [[ -f "$dest" && ! -L "$dest" ]]; then
+      mkdir -p "$(dirname "$BACKUP_DIR/${dest#$HOME/}")"
+      cp -a "$dest" "$BACKUP_DIR/${dest#$HOME/}"
+    fi
+
     cp -a "$src" "$dest"
     info "Deployed: ${dest#$HOME/}"
   fi
@@ -374,15 +408,20 @@ fi
 log "Step 6 · Omarchy Shell Plugins"
 
 PLUGINS=(
-  "https://github.com/ax1g/quickshell-screentime-plugin.git"
-  "https://github.com/crmne/omarchy-hyprmoncfg.git"
-  "https://github.com/ssupt/omarchy-bluetooth-audio.git"
+  "agx.screen-time:https://github.com/ax1g/quickshell-screentime-plugin.git"
+  "crmne.hyprmoncfg:https://github.com/crmne/omarchy-hyprmoncfg.git"
+  "ssupt.bluetooth-audio:https://github.com/ssupt/omarchy-bluetooth-audio.git"
 )
 
-for plugin_url in "${PLUGINS[@]}"; do
-  # omarchy plugin add exits non-zero if already installed; that is expected
-  info "Plugin: $plugin_url"
-  omarchy plugin add "$plugin_url" --enable --yes 2>/dev/null || true
+for entry in "${PLUGINS[@]}"; do
+  plugin_id="${entry%%:*}"
+  plugin_url="${entry#*:}"
+  if [[ -d "$HOME/.config/omarchy/plugins/$plugin_id" ]]; then
+    info "Plugin '$plugin_id' is already installed."
+  else
+    info "Installing plugin: $plugin_id..."
+    omarchy plugin add "$plugin_url" --enable --yes 2>/dev/null || warn "Could not install plugin $plugin_id"
+  fi
 done
 
 # ---------------------------------------------------------------------------

@@ -178,6 +178,7 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 | Concern | Protection |
 | :--- | :--- |
 | `omarchy update` replaces fingerprint driver | `IgnorePkg` in pacman.conf blocks both `libfprint` and the AUR package |
+| `omarchy refresh pacman` wipes pacman.conf | Native `pre-refresh-pacman.d` hook automatically re-locks `IgnorePkg` before `pacman -Syyuu` runs |
 | `omarchy update` overwrites dotfiles | All configs live in `~/.config/` — Omarchy never touches user configs |
 | AUR rebuild fails the appstream test | Pre-compiled binary archived in `~/.local/share/packages/` and `/var/cache/pacman/pkg/` |
 | Sensor fails / locked out | PAM uses `sufficient` — password fallback always works |

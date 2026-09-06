@@ -70,7 +70,6 @@ log "Step 1 · Install Official Packages"
 OFFICIAL_PKGS=(
   omarchy-zsh           # Omarchy repo: zsh + starship + eza + zoxide + fzf + bat + fd + mise + zsh-syntax-highlighting
   zsh-autosuggestions   # extra: fish-like autosuggestions for zsh
-  fprintd               # extra: fingerprint enrollment/verify daemon
   usbutils              # core: lsusb for hardware discovery
 )
 
@@ -94,9 +93,68 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2: EgisTec MOC Fingerprint Driver (hardware-detected, AUR)
+# Step 2: EgisTec MOC Fingerprint Driver & Authentication
 # ---------------------------------------------------------------------------
 log "Step 2 · Check Fingerprint Hardware"
+
+lock_pacman_driver() {
+  local conf="/etc/pacman.conf"
+  [[ -f "$conf" ]] || return 0
+  if ! grep -q "libfprint-egismoc-sdcp-git" "$conf" 2>/dev/null; then
+    info "Locking driver in /etc/pacman.conf (IgnorePkg)..."
+    if grep -q "^[[:space:]]*IgnorePkg" "$conf"; then
+      sudo sed -i '/^[[:space:]]*IgnorePkg/s/$/ libfprint libfprint-egismoc-sdcp-git/' "$conf"
+    elif grep -q "^[[:space:]]*HoldPkg" "$conf"; then
+      sudo sed -i '/^[[:space:]]*HoldPkg/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' "$conf"
+    elif grep -q "^\[options\]" "$conf"; then
+      sudo sed -i '/^\[options\]/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' "$conf"
+    fi
+  fi
+}
+
+setup_pam_integration() {
+  local fprintd_gate="auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed"
+
+  # sudo
+  if ! grep -q pam_fprintd.so /etc/pam.d/sudo 2>/dev/null; then
+    info "Configuring sudo for fingerprint authentication..."
+    sudo sed -i '1i auth      sufficient pam_fprintd.so' /etc/pam.d/sudo
+  fi
+  if ! grep -q 'omarchy-hw-laptop-closed' /etc/pam.d/sudo 2>/dev/null; then
+    sudo sed -i "/pam_fprintd\.so/i $fprintd_gate" /etc/pam.d/sudo
+  fi
+
+  # polkit-1
+  if [[ -f /etc/pam.d/polkit-1 ]]; then
+    if ! grep -q 'pam_fprintd.so' /etc/pam.d/polkit-1 2>/dev/null; then
+      info "Configuring polkit for fingerprint authentication..."
+      sudo sed -i '1i auth      sufficient pam_fprintd.so' /etc/pam.d/polkit-1
+    fi
+    if ! grep -q 'omarchy-hw-laptop-closed' /etc/pam.d/polkit-1 2>/dev/null; then
+      sudo sed -i "/pam_fprintd\.so/i $fprintd_gate" /etc/pam.d/polkit-1
+    fi
+  else
+    sudo tee /etc/pam.d/polkit-1 >/dev/null <<EOF
+$fprintd_gate
+auth      sufficient pam_fprintd.so
+auth      required pam_unix.so
+
+account   required pam_unix.so
+password  required pam_unix.so
+session   required pam_unix.so
+EOF
+  fi
+
+  # lock screen (Quickshell session lock)
+  if [[ ! -f /etc/pam.d/omarchy-lock-fingerprint ]]; then
+    info "Configuring lock screen for fingerprint authentication..."
+    sudo tee /etc/pam.d/omarchy-lock-fingerprint >/dev/null <<'EOF'
+#%PAM-1.0
+auth       required                    pam_fprintd.so
+account    include                     system-local-login
+EOF
+  fi
+}
 
 # Use Omarchy's own hardware detection rather than parsing lsusb manually.
 if omarchy-hw-fingerprint; then
@@ -117,10 +175,10 @@ if omarchy-hw-fingerprint; then
       echo
 
       if confirm "Install libfprint-egismoc-sdcp-git from AUR? (replaces stock libfprint)" true; then
-        # Prefer a pre-compiled binary from the local archive or pacman cache.
+        # Prefer a pre-compiled binary from the local dotfiles repo, user archive, or pacman cache.
         # This avoids the appstreamcli network-test failure during compilation.
-        CACHED_PKG=$(find "$HOME/.local/share/packages" /var/cache/pacman/pkg \
-          -name "libfprint-egismoc-sdcp-git-*.pkg.tar.zst" 2>/dev/null | head -n 1 || true)
+        CACHED_PKG=$(find "$DOTFILES_DIR/packages" "$HOME/.local/share/packages" /var/cache/pacman/pkg \
+          -name "libfprint-egismoc-sdcp-git-*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null | head -n 1 || true)
 
         if [[ -n "$CACHED_PKG" ]]; then
           info "Found pre-compiled package: $CACHED_PKG"
@@ -128,18 +186,14 @@ if omarchy-hw-fingerprint; then
           sudo pacman -U --noconfirm --ask=4 "$CACHED_PKG"
         else
           info "Compiling from AUR (bypassing appstream network test)..."
-          # Remove stock libfprint first (deps-only so fprintd stays)
+          # Remove stock libfprint first (deps-only so fprintd stays if present)
           if pacman -Q libfprint &>/dev/null && ! pacman -Q libfprint-egismoc-sdcp-git &>/dev/null; then
             sudo pacman -Rdd --noconfirm libfprint
           fi
           yay -S --noconfirm --mflags="--nocheck" libfprint-egismoc-sdcp-git
         fi
 
-        # Lock the driver against updates in /etc/pacman.conf
-        if ! grep -q "libfprint-egismoc-sdcp-git" /etc/pacman.conf 2>/dev/null; then
-          info "Locking driver in /etc/pacman.conf (IgnorePkg)..."
-          sudo sed -i '/^HoldPkg/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' /etc/pacman.conf
-        fi
+        lock_pacman_driver
 
         # Archive the compiled binary for future offline installs
         BUILT_PKG=$(find "$HOME/.cache/yay/libfprint-egismoc-sdcp-git" \
@@ -147,36 +201,40 @@ if omarchy-hw-fingerprint; then
           ! -name "*debug*" 2>/dev/null | head -n 1 || true)
 
         if [[ -n "$BUILT_PKG" ]]; then
-          mkdir -p "$HOME/.local/share/packages"
+          mkdir -p "$DOTFILES_DIR/packages" "$HOME/.local/share/packages"
+          cp -n "$BUILT_PKG" "$DOTFILES_DIR/packages/" 2>/dev/null || true
           cp -n "$BUILT_PKG" "$HOME/.local/share/packages/" 2>/dev/null || true
           sudo cp -n "$BUILT_PKG" /var/cache/pacman/pkg/ 2>/dev/null || true
           info "Archived driver binary for offline recovery."
         fi
-
-        sudo systemctl restart fprintd
       fi
     else
       info "EgisTec SDCP driver already installed."
-
-      # Verify the IgnorePkg lock is still in place
-      if ! grep -q "libfprint-egismoc-sdcp-git" /etc/pacman.conf 2>/dev/null; then
-        warn "IgnorePkg lock missing — re-adding..."
-        sudo sed -i '/^HoldPkg/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' /etc/pacman.conf
-      fi
+      lock_pacman_driver
     fi
   fi
 
-  # Offer enrollment if no prints are registered for the current user.
-  # Delegates to Omarchy's own setup wizard which handles PAM, polkit,
-  # and the lock screen clamshell gate.
-  if command -v fprintd-list &>/dev/null; then
-    if ! fprintd-list "$USER" 2>/dev/null | grep -q "right-index-finger"; then
-      echo
-      if confirm "No fingerprint enrolled. Run Omarchy fingerprint setup?" true; then
-        omarchy setup security fingerprint || warn "Fingerprint setup did not complete."
-      fi
-    else
-      info "Fingerprint already enrolled for $USER."
+  # Install fprintd now that the proper libfprint provider is in place
+  if omarchy-pkg-missing fprintd; then
+    info "Installing fprintd..."
+    omarchy-pkg-add fprintd
+  fi
+  sudo systemctl restart fprintd 2>/dev/null || true
+
+  # Ensure PAM integration is configured (sudo, polkit, lock screen with clamshell gate)
+  if [[ ! -f /etc/pam.d/omarchy-lock-fingerprint ]] || ! grep -q pam_fprintd.so /etc/pam.d/sudo 2>/dev/null; then
+    setup_pam_integration
+  fi
+
+  # Check if fingerprint enrollment is complete
+  if command -v fprintd-list &>/dev/null && fprintd-list "$USER" 2>/dev/null | grep -q "right-index-finger"; then
+    info "Fingerprint already enrolled and PAM configured for $USER."
+  else
+    echo
+    if (( ASSUME_YES )); then
+      info "PAM configured. Run 'omarchy setup security fingerprint' after setup to enroll your finger."
+    elif confirm "No fingerprint enrolled. Run Omarchy fingerprint enrollment wizard now?" true; then
+      omarchy setup security fingerprint || warn "Fingerprint enrollment did not complete."
     fi
   fi
 else
@@ -235,7 +293,7 @@ sync_item() {
   mkdir -p "$(dirname "$dest")"
 
   # Back up existing non-symlink files before overwriting
-  if [[ -e "$dest" && ! -L "$dest" ]]; then
+  if [[ -f "$dest" && ! -L "$dest" ]]; then
     mkdir -p "$(dirname "$BACKUP_DIR/${dest#$HOME/}")"
     cp -a "$dest" "$BACKUP_DIR/${dest#$HOME/}"
   fi

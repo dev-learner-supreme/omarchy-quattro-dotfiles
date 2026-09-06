@@ -1,0 +1,17 @@
+#!/bin/bash
+# Omarchy hook: post-update
+# Called during `omarchy update` after system package upgrades and migrations.
+# Verifies that /etc/pacman.conf maintains IgnorePkg for libfprint.
+
+CONF="/etc/pacman.conf"
+[[ -f "$CONF" ]] || exit 0
+
+if ! grep -q "libfprint-egismoc-sdcp-git" "$CONF"; then
+  if grep -q "^[[:space:]]*IgnorePkg" "$CONF"; then
+    sudo sed -i '/^[[:space:]]*IgnorePkg/s/$/ libfprint libfprint-egismoc-sdcp-git/' "$CONF"
+  elif grep -q "^[[:space:]]*HoldPkg" "$CONF"; then
+    sudo sed -i '/^[[:space:]]*HoldPkg/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' "$CONF"
+  elif grep -q "^\[options\]" "$CONF"; then
+    sudo sed -i '/^\[options\]/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' "$CONF"
+  fi
+fi

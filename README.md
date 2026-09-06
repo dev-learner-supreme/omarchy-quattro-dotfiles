@@ -58,6 +58,12 @@ cd ~/dotfiles
 
 ---
 
+## Documentation Guides
+* [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md): Complete setup architecture, packages breakdown, EgisTec fingerprint configuration, and recovery instructions.
+* [SSH_SETUP_GUIDE.md](SSH_SETUP_GUIDE.md): Native Arch & Omarchy SSH key generation, systemd user socket activation, and session auto-load guide.
+
+---
+
 ## Devices in use:
 * **Acer sfg14-71**: The main work laptop.
 * **Headless Realme Slimbook**: The converted at home PC.

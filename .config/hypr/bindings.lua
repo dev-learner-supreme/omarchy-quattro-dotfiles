@@ -30,7 +30,7 @@
 
 -- Changing Screenshot keybindings
 hl.unbind("PRINT")
-o.bind("SUPER + SHIFT +S", "screenshot", "omarchy-capture-screenshot")
+o.bind("SUPER + SHIFT + S", "screenshot", "omarchy-capture-screenshot")
 
 -- Changing the application launcher binding
 hl.unbind("SUPER + ALT + SPACE")

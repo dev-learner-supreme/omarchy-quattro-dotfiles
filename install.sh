@@ -9,6 +9,7 @@
 #   - omarchy-hw-fingerprint for hardware detection
 #   - omarchy setup security fingerprint for enrollment
 #   - omarchy install browser for browser installation
+#   - omarchy install terminal for terminal installation
 #   - gum confirm for interactive prompts
 #   - sudo for privilege escalation in terminal scripts
 #
@@ -78,6 +79,18 @@ if omarchy-pkg-missing "${OFFICIAL_PKGS[@]}"; then
   omarchy-pkg-add "${OFFICIAL_PKGS[@]}"
 else
   info "All required official packages are already installed."
+fi
+
+# Terminal: Ghostty via Omarchy installer
+if omarchy-pkg-missing ghostty; then
+  info "Installing Ghostty terminal via Omarchy..."
+  omarchy install terminal ghostty || warn "Could not install ghostty via omarchy install"
+else
+  info "Ghostty terminal is already installed."
+  # Ensure ghostty is set as the default in xdg-terminals.list if missing
+  if [[ ! -f "$HOME/.config/xdg-terminals.list" ]] || ! grep -q "ghostty" "$HOME/.config/xdg-terminals.list" 2>/dev/null; then
+    omarchy install terminal ghostty 2>/dev/null || true
+  fi
 fi
 
 # ---------------------------------------------------------------------------

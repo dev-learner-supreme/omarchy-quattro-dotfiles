@@ -7,7 +7,7 @@
 #   - omarchy-pkg-aur-add for AUR packages
 #   - omarchy-pkg-missing for idempotent checks
 #   - omarchy-hw-fingerprint for hardware detection
-#   - omarchy setup security fingerprint for enrollment
+#   - fprintd-enroll for hardware fingerprint enrollment
 #   - omarchy install browser for browser installation
 #   - omarchy install terminal for terminal installation
 #   - gum confirm for interactive prompts
@@ -111,6 +111,16 @@ fi
 # ---------------------------------------------------------------------------
 log "Step 2 · Check Fingerprint Hardware"
 
+archive_driver_pkg() {
+  local pkg="$1"
+  [[ -n "$pkg" && -f "$pkg" ]] || return 0
+  mkdir -p "$DOTFILES_DIR/packages" "$HOME/.local/share/packages"
+  cp -n "$pkg" "$DOTFILES_DIR/packages/" 2>/dev/null || true
+  cp -n "$pkg" "$HOME/.local/share/packages/" 2>/dev/null || true
+  sudo cp -n "$pkg" /var/cache/pacman/pkg/ 2>/dev/null || true
+  info "Archived driver binary for offline recovery."
+}
+
 lock_pacman_driver() {
   local conf="/etc/pacman.conf"
   [[ -f "$conf" ]] || return 0
@@ -129,7 +139,7 @@ lock_pacman_driver() {
 setup_pam_integration() {
   local fprintd_gate="auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed"
 
-  # sudo
+  # sudo: ensure pam_fprintd and clamshell gate are configured in correct sequence
   if ! grep -q pam_fprintd.so /etc/pam.d/sudo 2>/dev/null; then
     info "Configuring sudo for fingerprint authentication..."
     sudo sed -i '1i auth      sufficient pam_fprintd.so' /etc/pam.d/sudo
@@ -138,7 +148,7 @@ setup_pam_integration() {
     sudo sed -i "/pam_fprintd\.so/i $fprintd_gate" /etc/pam.d/sudo
   fi
 
-  # polkit-1
+  # polkit-1: ensure pam_fprintd and clamshell gate are configured in correct sequence
   if [[ -f /etc/pam.d/polkit-1 ]]; then
     if ! grep -q 'pam_fprintd.so' /etc/pam.d/polkit-1 2>/dev/null; then
       info "Configuring polkit for fingerprint authentication..."
@@ -159,12 +169,14 @@ session   required pam_unix.so
 EOF
   fi
 
-  # lock screen (Quickshell session lock)
-  if [[ ! -f /etc/pam.d/omarchy-lock-fingerprint ]]; then
-    info "Configuring lock screen for fingerprint authentication..."
+  # lock screen (Quickshell session lock):
+  # timeout=-1 and max-tries=-1 prevent fprintd from timing out after 30s
+  # and triggering an assertion crash loop in the SDCP driver when Quickshell re-arms.
+  if [[ ! -f /etc/pam.d/omarchy-lock-fingerprint ]] || ! grep -q "timeout=-1" /etc/pam.d/omarchy-lock-fingerprint 2>/dev/null; then
+    info "Configuring lock screen for persistent fingerprint authentication..."
     sudo tee /etc/pam.d/omarchy-lock-fingerprint >/dev/null <<'EOF'
 #%PAM-1.0
-auth       required                    pam_fprintd.so
+auth       required                    pam_fprintd.so timeout=-1 max-tries=-1
 account    include                     system-local-login
 EOF
   fi
@@ -198,6 +210,7 @@ if omarchy-hw-fingerprint; then
           info "Found pre-compiled package: $CACHED_PKG"
           # --ask=4 answers the "Remove libfprint?" conflict prompt with yes
           sudo pacman -U --noconfirm --ask=4 "$CACHED_PKG"
+          archive_driver_pkg "$CACHED_PKG"
         else
           info "Compiling from AUR (bypassing appstream network test)..."
           # Remove stock libfprint first (deps-only so fprintd stays if present)
@@ -205,26 +218,22 @@ if omarchy-hw-fingerprint; then
             sudo pacman -Rdd --noconfirm libfprint
           fi
           yay -S --noconfirm --mflags="--nocheck" libfprint-egismoc-sdcp-git
+
+          BUILT_PKG=$(find "$HOME/.cache/yay/libfprint-egismoc-sdcp-git" \
+            -name "libfprint-egismoc-sdcp-git-*-x86_64.pkg.tar.zst" \
+            ! -name "*debug*" 2>/dev/null | head -n 1 || true)
+          archive_driver_pkg "$BUILT_PKG"
         fi
 
         lock_pacman_driver
-
-        # Archive the compiled binary for future offline installs
-        BUILT_PKG=$(find "$HOME/.cache/yay/libfprint-egismoc-sdcp-git" \
-          -name "libfprint-egismoc-sdcp-git-*-x86_64.pkg.tar.zst" \
-          ! -name "*debug*" 2>/dev/null | head -n 1 || true)
-
-        if [[ -n "$BUILT_PKG" ]]; then
-          mkdir -p "$DOTFILES_DIR/packages" "$HOME/.local/share/packages"
-          cp -n "$BUILT_PKG" "$DOTFILES_DIR/packages/" 2>/dev/null || true
-          cp -n "$BUILT_PKG" "$HOME/.local/share/packages/" 2>/dev/null || true
-          sudo cp -n "$BUILT_PKG" /var/cache/pacman/pkg/ 2>/dev/null || true
-          info "Archived driver binary for offline recovery."
-        fi
       fi
     else
       info "EgisTec SDCP driver already installed."
       lock_pacman_driver
+      # Ensure all offline recovery locations are populated
+      CACHED_PKG=$(find "$DOTFILES_DIR/packages" "$HOME/.local/share/packages" /var/cache/pacman/pkg \
+        -name "libfprint-egismoc-sdcp-git-*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null | head -n 1 || true)
+      archive_driver_pkg "$CACHED_PKG"
     fi
   fi
 
@@ -236,8 +245,12 @@ if omarchy-hw-fingerprint; then
   sudo systemctl restart fprintd 2>/dev/null || true
 
   # Ensure PAM integration is configured (sudo, polkit, lock screen with clamshell gate)
-  if [[ ! -f /etc/pam.d/omarchy-lock-fingerprint ]] || ! grep -q pam_fprintd.so /etc/pam.d/sudo 2>/dev/null; then
-    setup_pam_integration
+  setup_pam_integration
+
+  # Warm up sudo credentials before checking root prints so prompts are explicit
+  if ! sudo -n true 2>/dev/null; then
+    info "Sudo privileges needed for hardware authentication setup..."
+    sudo -v
   fi
 
   CURRENT_USER="${USER:-$(id -un)}"
@@ -256,14 +269,15 @@ if omarchy-hw-fingerprint; then
   fi
 
   # Check if fingerprint enrollment is complete
-  if command -v fprintd-list &>/dev/null && fprintd-list "$CURRENT_USER" 2>/dev/null | grep -q "right-index-finger"; then
+  if command -v fprintd-list &>/dev/null && fprintd-list "$CURRENT_USER" 2>/dev/null | grep -qi "finger"; then
     info "Fingerprint already enrolled and PAM configured for $CURRENT_USER."
   else
     echo
     if (( ASSUME_YES )); then
-      info "PAM configured. Run 'omarchy setup security fingerprint' after setup to enroll your finger."
-    elif confirm "No fingerprint enrolled. Run Omarchy fingerprint enrollment wizard now?" true; then
-      omarchy setup security fingerprint || warn "Fingerprint enrollment did not complete."
+      info "PAM configured. Run 'fprintd-enroll' after setup to enroll your finger."
+    elif confirm "No fingerprint enrolled. Run fingerprint enrollment now?" true; then
+      info "Swipe or place your right index finger repeatedly on the sensor until completed..."
+      fprintd-enroll "$CURRENT_USER" || warn "Fingerprint enrollment did not complete."
     fi
   fi
 else

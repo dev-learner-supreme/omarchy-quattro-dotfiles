@@ -90,8 +90,8 @@ cryptographic key desyncs and enrollments disappear after the first verification
 # Reinstall from cached binary (no compilation needed)
 sudo pacman -U ~/.local/share/packages/libfprint-egismoc-sdcp-git-*.pkg.tar.zst
 
-# Re-enroll fingerprint
-omarchy setup security fingerprint
+# Re-enroll fingerprint directly (avoids pacman conflicts with stock libfprint)
+fprintd-enroll "$USER"
 ```
 
 ---
@@ -153,7 +153,7 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 | Step | Action | Omarchy API Used |
 | :--- | :--- | :--- |
 | **1** | Install official packages (omarchy-zsh, zsh-autosuggestions, fprintd, usbutils) | `omarchy-pkg-add` |
-| **2** | Detect EgisTec MOC sensor; install SDCP driver if needed; lock in IgnorePkg; run enrollment wizard | `omarchy-hw-fingerprint`, `omarchy setup security fingerprint` |
+| **2** | Detect EgisTec MOC sensor; install SDCP driver if needed; archive offline package; lock in IgnorePkg; configure clamshell + persistent lock PAM | `omarchy-hw-fingerprint`, `fprintd-enroll` |
 | **3** | Prompt for optional AUR packages (hyprmoncfg, brave-origin) | `omarchy-pkg-aur-add`, `omarchy install browser` |
 | **4** | Back up existing configs to `~/.dotfiles-backup/`; deploy all dotfiles | File copy with backup |
 | **5** | Enable systemd `ssh-agent.socket`; write `environment.d` config; configure `~/.ssh/config` | `systemctl --user` |

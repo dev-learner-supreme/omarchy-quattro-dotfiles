@@ -15,3 +15,8 @@ if ! grep -q "libfprint-egismoc-sdcp-git" "$CONF"; then
     sudo sed -i '/^\[options\]/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' "$CONF"
   fi
 fi
+
+# Ensure lock screen PAM maintains timeout=-1 to prevent crash loop
+if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && ! grep -q "timeout=-1" /etc/pam.d/omarchy-lock-fingerprint; then
+  sudo sed -i 's/pam_fprintd\.so.*/pam_fprintd.so timeout=-1 max-tries=-1/' /etc/pam.d/omarchy-lock-fingerprint
+fi

@@ -61,3 +61,7 @@ if [ -f '/home/arun/Downloads/google-cloud-sdk/path.zsh.inc' ]; then . '/home/ar
 
 # The next line enables shell command completion for gcloud.
 if [ -f '/home/arun/Downloads/google-cloud-sdk/completion.zsh.inc' ]; then . '/home/arun/Downloads/google-cloud-sdk/completion.zsh.inc'; fi
+
+# Android SDK & Tooling
+export ANDROID_HOME="$HOME/Android/Sdk"
+export PATH="$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin"

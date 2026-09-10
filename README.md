@@ -1,69 +1,140 @@
+<div align="center">
+
 # Omarchy Quattro Personal Dotfiles & Configurations
 
-This repository captures all user customizations structured strictly according to Omarchy Quattro standards:
+[![Platform](https://img.shields.io/badge/platform-Arch%20Linux-1793D1?logo=archlinux&logoColor=white)](https://archlinux.org)
+[![Omarchy](https://img.shields.io/badge/omarchy-quattro-2b6cb0)](https://omarchy.org)
+[![Shell](https://img.shields.io/badge/shell-bash-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Maintained](https://img.shields.io/badge/maintained-yes-brightgreen)](#)
 
-* **Hyprland Window Manager (`.config/hypr/`)**:
-  * Custom keybindings (`bindings.lua`):
-    * `F7` (`SUPER + P` / `XF86Display`) → Toggles `crmne.hyprmoncfg` display manager.
-    * `F8` (`SUPER + L`) → Locks the screen (`omarchy-system-lock`).
-    * `ALT + SPACE` → Application launcher.
-    * `SUPER + SHIFT + S` → Screen capture.
-  * Window rules for Android Emulator / QEMU floating & full opacity.
-  * Input & Look'n'Feel personal overrides.
-* **Omarchy Shell & Plugins (`.config/omarchy/`) (Optional)**:
-  * Full top bar layout & widget configurations (`shell.json`).
-  * Custom themes (`awsm-changi`, `luminous`, `sora-koi`).
-  * Menu extensions (`omarchy-menu.jsonc`).
-  * Automation hooks (`theme-set`).
-* **Audio & Hardware Autoswitching (`.config/wireplumber/` & `.local/share/wireplumber/`)**:
-  * WirePlumber 0.5 sink priority rules (`50-alsa-output-priority.conf`):
-    * Headphones: Priority `1500`
-    * Internal Speakers: Priority `1200`
-    * HDMI Monitors: Priority `600` (prevents external displays from stealing audio)
-  * Dynamic hardware jack autoswitcher (`sof-autoswitch.lua`).
-  * Bluetooth A2DP autoconnect rules.
-* **Terminals & Shell Tools**:
-  * Ghostty, Alacritty, Kitty, Foot terminal configs.
-  * Starship prompt, Btop, Lazygit, Git config.
-  * `.bashrc` & `.zshrc`.
+Personal Hyprland / Omarchy Quattro configuration and installer, structured for reproducible setup across machines.
+
+</div>
+
+---
+
+## Contents
+
+- [Overview](#overview)
+- [Keybindings](#keybindings)
+- [Audio Priority Rules](#audio-priority-rules)
+- [Installation](#installation-on-another-omarchy-machine)
+- [Safety Guards](#safety-guards)
+- [Security & Update Safety](#security--omarchy-update-safety)
+- [Documentation](#documentation-guides)
+- [Devices in Use](#devices-in-use)
+
+---
+
+## Overview
+
+| Component | Path | Highlights |
+|---|---|---|
+| Hyprland | `.config/hypr/` | Custom keybindings (`bindings.lua`), window rules for Android Emulator / QEMU (floating, full opacity), input & look'n'feel overrides |
+| Omarchy Shell | `.config/omarchy/` *(optional)* | Bar/widget layout (`shell.json`), custom themes (`awsm-changi`, `luminous`, `sora-koi`), menu extensions (`omarchy-menu.jsonc`), theme-set automation hooks |
+| Audio (WirePlumber) | `.config/wireplumber/`, `.local/share/wireplumber/` | Sink priority rules, dynamic hardware jack autoswitcher (`sof-autoswitch.lua`), Bluetooth A2DP autoconnect |
+| Terminals & Shell Tools | various | Ghostty, Alacritty, Kitty, Foot configs; Starship, btop, lazygit, git config; `.bashrc` / `.zshrc` |
+
+## Keybindings
+
+| Binding | Action |
+|---|---|
+| `F7` / `SUPER + P` / `XF86Display` | Toggle `crmne.hyprmoncfg` display manager |
+| `F8` / `SUPER + L` | Lock screen (`omarchy-system-lock`) |
+| `ALT + SPACE` | Application launcher |
+| `SUPER + SHIFT + S` | Screen capture |
+
+## Audio Priority Rules
+
+`50-alsa-output-priority.conf` sets WirePlumber 0.5 sink priorities:
+
+| Output | Priority | Note |
+|---|---|---|
+| Headphones | `1500` | Highest — always preferred when connected |
+| Internal Speakers | `1200` | Fallback default |
+| HDMI Monitors | `600` | Deliberately low — prevents external displays from stealing audio |
 
 ---
 
 ## Installation on Another Omarchy Machine
 
 ### 1. Clone the repository
+
 ```bash
 git clone <your-repo-url> ~/dotfiles
 cd ~/dotfiles
 ```
 
 ### 2. Run the installer
+
 ```bash
-./install.sh
+./install.sh        # interactive — prompts before AUR/optional steps
+./install.sh -y      # unattended — accepts all defaults
 ```
 
-### What `install.sh` does automatically:
-1. Backs up any existing conflicting configs to `~/.dotfiles-backup/<timestamp>/`.
-2. Deploys `.config` and `.local` files into place.
-3. Automatically adds and enables all third-party shell plugins via the official Omarchy CLI (`omarchy plugin add ... --enable`).
-4. Checks and installs required AUR packages (`hyprmoncfg`, `brave-origin-bin`).
-5. Reloads Hyprland, WirePlumber, and the Omarchy Shell.
+### What `install.sh` does
+
+| Step | Action |
+|---|---|
+| Pre-flight | Confirms this is an Omarchy install, warns if the detected version looks pre-Quattro, refuses to run a second instance concurrently, keeps `sudo` alive for the run |
+| 1 | Installs official packages (`omarchy-zsh`, `zsh-autosuggestions`, `usbutils`) and Ghostty |
+| 2 | Detects EgisTec Match-on-Chip fingerprint hardware, installs the SDCP driver (checksum-tracked), configures PAM for sudo / polkit / lock screen — automatically backed up beforehand and rolled back if anything fails |
+| 3 | Prompts for optional AUR packages (`hyprmoncfg`, `brave-origin-bin`) |
+| 4 | Backs up any conflicting existing configs, then deploys `.config` and `.local` files |
+| 5 | Configures the native SSH agent via systemd socket activation |
+| 6 | Reloads Hyprland, WirePlumber, and the Omarchy Shell; confirms `sudo` still works before exiting |
+
+> [!NOTE]
+> Earlier versions of this repo also installed a set of third-party Omarchy Shell plugins during setup. That step has been removed — plugin installation is no longer part of `install.sh`.
+
+---
+
+## Safety Guards
+
+`install.sh` treats anything touching authentication or system packages as higher-risk than plain dotfile syncing, and guards accordingly:
+
+| Guard | What it protects against |
+|---|---|
+| Lockfile (`~/.cache/omarchy-dotfiles-install.lock`) | Two copies of the installer running at once |
+| `sudo` keep-alive | The `sudo` timestamp expiring mid-run and re-prompting unpredictably |
+| PAM backup before edit | `/etc/pam.d/sudo` and `/etc/pam.d/polkit-1` are copied to `~/.dotfiles-backup/<timestamp>/pam/` before any edit |
+| Auto-restore on failure | If any step fails after the PAM backup exists, both files are restored automatically |
+| Line-count sanity check | PAM edits only ever insert lines; a file that comes out *shorter* than its backup triggers an immediate restore, not a silent continue |
+| Checksum tracking for the cached fingerprint driver binary | A changed hash under the same filename is flagged, not silently trusted and overwritten |
+| AUR reachability check | Network issues are caught before a `yay` build starts, not partway through |
+| Final `sudo -v` check | The last thing the script does is confirm `sudo` still works, and tells you explicitly not to close the terminal if it doesn't |
 
 ---
 
 ## Security & Omarchy Update Safety
-* **Zero System Touches**: All configs live strictly in `$HOME/.config/` and `$HOME/.local/`.
-* **Update Safe**: Running `omarchy update` on Omarchy Quattro will never overwrite your personal configurations.
-* **No Secrets Committed**: API tokens, credentials, and private keys are excluded and stored in standard local state paths (`~/.local/state/`).
+
+> [!IMPORTANT]
+> This installer is **not** limited to `$HOME`. Step 2 (fingerprint setup) makes real changes outside your home directory:
+> - Edits `/etc/pam.d/sudo` and `/etc/pam.d/polkit-1` to add fingerprint authentication
+> - Writes `/etc/pam.d/omarchy-lock-fingerprint` for the session lock screen
+> - May edit `/etc/pacman.conf` (`IgnorePkg`) to pin the fingerprint driver against updates
+> - Installs a system package (`libfprint-egismoc-sdcp-git`) via `pacman -U`, replacing stock `libfprint`
+>
+> These changes are backed up automatically and rolled back on failure (see [Safety Guards](#safety-guards)), but they are genuine system-level edits — review Step 2 in [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md) before running on a new machine, particularly one without EgisTec fingerprint hardware where this step should just no-op.
+
+What *does* stay contained to your user account:
+
+- Everything deployed in Step 4 lives strictly under `$HOME/.config/` and `$HOME/.local/`
+- `omarchy update` will not overwrite anything this repo deploys under `.config`/`.local` — those are user files by Omarchy convention
+- No secrets are committed: API tokens, credentials, and private keys are excluded and expected to live in standard local state paths (`~/.local/state/`)
 
 ---
 
 ## Documentation Guides
-* [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md): Complete setup architecture, packages breakdown, EgisTec fingerprint configuration, and recovery instructions.
-* [SSH_SETUP_GUIDE.md](SSH_SETUP_GUIDE.md): Native Arch & Omarchy SSH key generation, systemd user socket activation, and session auto-load guide.
+
+- [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md) — complete setup architecture, package breakdown, EgisTec fingerprint configuration, and recovery instructions
+- [SSH_SETUP_GUIDE.md](SSH_SETUP_GUIDE.md) — native Arch & Omarchy SSH key generation, systemd user socket activation, and session auto-load guide
 
 ---
 
-## Devices in use:
-* **Acer sfg14-71**: The main work laptop.
-* **Headless Realme Slimbook**: The converted at home PC.
+## Devices in Use
+
+| Device | Role |
+|---|---|
+| Acer SFG14-71 | Main work laptop |
+| Realme Slimbook (headless) | Home PC |

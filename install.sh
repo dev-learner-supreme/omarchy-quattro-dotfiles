@@ -417,7 +417,9 @@ if omarchy-hw-fingerprint; then
   fi
 
   # Check if fingerprint enrollment is complete
-  if command -v fprintd-list &>/dev/null && fprintd-list "$CURRENT_USER" 2>/dev/null | grep -qi "finger"; then
+  if command -v fprintd-list &>/dev/null &&
+     fprintd-list "$CURRENT_USER" 2>/dev/null |
+     grep -qE '^[[:space:]]*-[[:space:]]+#[0-9]+'; then
     info "Fingerprint already enrolled and PAM configured for $CURRENT_USER."
   else
     echo

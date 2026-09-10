@@ -16,8 +16,24 @@
 # Usage:
 #   ./install.sh          # Interactive mode (prompts for AUR/optional steps)
 #   ./install.sh -y       # Unattended mode (accepts all defaults)
+#
+# Safety notes:
+#   - Refuses to run if Omarchy itself isn't detected, and warns (doesn't
+#     block) if the detected version looks pre-Quattro.
+#   - Refuses to run two copies of itself concurrently.
+#   - Keeps sudo alive for the duration of the run instead of letting the
+#     timestamp expire mid-script.
+#   - Backs up /etc/pam.d/sudo and /etc/pam.d/polkit-1 before editing them,
+#     and automatically restores them if anything fails partway through.
+#   - Tracks a sha256 for the cached fingerprint driver binary and refuses
+#     to silently overwrite the archived copy if it ever changes unexpectedly.
+#   - Confirms sudo still works at the very end, before you close the terminal.
 # ==============================================================================
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
 
 # Ensure script is run as normal user, not via sudo/root
 if [[ $EUID -eq 0 ]]; then
@@ -29,6 +45,7 @@ fi
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_DIR="$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)"
+PAM_BACKUP_DIR="$BACKUP_DIR/pam"
 ASSUME_YES=0
 
 [[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]] && ASSUME_YES=1
@@ -39,6 +56,7 @@ ASSUME_YES=0
 log()  { echo -e "\e[32m\n$*\e[0m"; }
 info() { echo -e "\e[34m:: $*\e[0m"; }
 warn() { echo -e "\e[33mWarning: $*\e[0m" >&2; }
+fail() { echo -e "\e[31mError: $*\e[0m" >&2; exit 1; }
 
 confirm() {
   local prompt="$1"
@@ -66,6 +84,73 @@ confirm() {
     return 1
   fi
 }
+
+# ---------------------------------------------------------------------------
+# PAM backup/restore — shared by the error trap and Step 2
+# ---------------------------------------------------------------------------
+restore_pam_backup() {
+  [[ -f "$PAM_BACKUP_DIR/sudo" ]] && sudo cp "$PAM_BACKUP_DIR/sudo" /etc/pam.d/sudo
+  [[ -f "$PAM_BACKUP_DIR/polkit-1" ]] && sudo cp "$PAM_BACKUP_DIR/polkit-1" /etc/pam.d/polkit-1
+  info "PAM files restored from $PAM_BACKUP_DIR."
+}
+
+# ---------------------------------------------------------------------------
+# Error trap — prints the failing line instead of dying silently, and rolls
+# back PAM edits automatically if a backup exists (i.e. Step 2 was mid-flight).
+# ---------------------------------------------------------------------------
+on_error() {
+  local exit_code=$?
+  local line_no=$1
+  echo -e "\e[31m\nScript failed at line $line_no (exit code $exit_code).\e[0m" >&2
+  if [[ -d "${PAM_BACKUP_DIR:-}" ]] && [[ -n "$(ls -A "$PAM_BACKUP_DIR" 2>/dev/null)" ]]; then
+    warn "Restoring /etc/pam.d/sudo and /etc/pam.d/polkit-1 from backup due to failure..."
+    restore_pam_backup
+  fi
+  exit "$exit_code"
+}
+trap 'on_error $LINENO' ERR
+
+# ---------------------------------------------------------------------------
+# Lockfile — refuse to run two copies of this script at once
+# ---------------------------------------------------------------------------
+LOCK_DIR="$HOME/.cache/omarchy-dotfiles-install.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  fail "Another instance of install.sh appears to be running (found $LOCK_DIR). Remove it manually if that's not the case."
+fi
+
+# ---------------------------------------------------------------------------
+# Environment guards — confirm this is actually an Omarchy install, and
+# warn (without blocking) if the detected version looks pre-Quattro, since
+# Step 6 below assumes Quattro's Quickshell-based `omarchy restart shell`.
+# ---------------------------------------------------------------------------
+command -v pacman &>/dev/null || fail "pacman not found — this script only supports Arch-based Omarchy installs."
+
+if ! command -v omarchy-pkg-add &>/dev/null; then
+  fail "omarchy-pkg-add not found. This script requires an Omarchy installation (omarchy.org) — it will not work on plain Arch."
+fi
+
+OMARCHY_DETECTED_VERSION=""
+if command -v omarchy &>/dev/null; then
+  OMARCHY_DETECTED_VERSION="$(omarchy version 2>/dev/null || true)"
+fi
+
+if [[ -n "$OMARCHY_DETECTED_VERSION" ]]; then
+  info "Detected Omarchy version: $OMARCHY_DETECTED_VERSION"
+  if [[ "$OMARCHY_DETECTED_VERSION" =~ ^[0-3]\. ]]; then
+    warn "This script assumes Omarchy Quattro (4.x) conventions (Quickshell restart, environment.d, etc.)."
+    warn "Detected version looks pre-Quattro — Step 6 (Reload Services) may not behave as expected."
+    confirm "Continue anyway?" false || fail "Aborted by user."
+  fi
+else
+  warn "Could not determine Omarchy version (omarchy version returned nothing). Proceeding, but Quattro-specific steps may silently no-op."
+fi
+
+# Keep sudo alive for the whole run instead of letting the timestamp expire
+# mid-script and re-prompting unexpectedly. Killed automatically on exit.
+sudo -v
+( while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
+SUDO_KEEPALIVE_PID=$!
+trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # Step 1: Official Packages (Omarchy repo + Arch core/extra)
@@ -115,10 +200,30 @@ archive_driver_pkg() {
   local pkg="$1"
   [[ -n "$pkg" && -f "$pkg" ]] || return 0
   mkdir -p "$DOTFILES_DIR/packages" "$HOME/.local/share/packages"
+
+  # Track a checksum for the archived binary. If a future run finds a
+  # differently-hashed package under the same filename, refuse to silently
+  # overwrite the archived copy — that shouldn't happen with a pinned AUR
+  # git package and is worth a human looking at.
+  local checksum_file="$DOTFILES_DIR/packages/.sha256sums"
+  local pkg_name pkg_hash recorded_hash
+  pkg_name="$(basename "$pkg")"
+  pkg_hash="$(sha256sum "$pkg" | awk '{print $1}')"
+
+  if [[ -f "$checksum_file" ]]; then
+    recorded_hash="$(grep -F " $pkg_name" "$checksum_file" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ -n "$recorded_hash" && "$recorded_hash" != "$pkg_hash" ]]; then
+      warn "Checksum mismatch for $pkg_name vs. previously archived copy — NOT overwriting automatically."
+      warn "Verify this binary manually before trusting it (recorded: ${recorded_hash:0:12}..., now: ${pkg_hash:0:12}...)."
+      return 0
+    fi
+  fi
+
+  echo "$pkg_hash $pkg_name" >> "$checksum_file"
   cp -n "$pkg" "$DOTFILES_DIR/packages/" 2>/dev/null || true
   cp -n "$pkg" "$HOME/.local/share/packages/" 2>/dev/null || true
   sudo cp -n "$pkg" /var/cache/pacman/pkg/ 2>/dev/null || true
-  info "Archived driver binary for offline recovery."
+  info "Archived driver binary for offline recovery (sha256: ${pkg_hash:0:12}...)."
 }
 
 lock_pacman_driver() {
@@ -133,18 +238,35 @@ lock_pacman_driver() {
     elif grep -q "^\[options\]" "$conf"; then
       sudo sed -i '/^\[options\]/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' "$conf"
     fi
+    warn "libfprint/libfprint-egismoc-sdcp-git are now excluded from 'omarchy update' and pacman upgrades."
+    warn "You'll need to update this driver manually going forward — it won't happen automatically."
   fi
 }
 
 setup_pam_integration() {
-  local fprintd_gate="auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed"
+  # Back up both files before touching them. This backup is also what the
+  # global error trap (on_error) uses to auto-restore if anything below fails.
+  mkdir -p "$PAM_BACKUP_DIR"
+  [[ -f /etc/pam.d/sudo ]] && cp "/etc/pam.d/sudo" "$PAM_BACKUP_DIR/sudo"
+  [[ -f /etc/pam.d/polkit-1 ]] && cp "/etc/pam.d/polkit-1" "$PAM_BACKUP_DIR/polkit-1"
+
+  # Only wire in the laptop-closed clamshell gate if the binary actually
+  # exists on this system — pam_exec pointed at a missing binary logs a
+  # failure on every single auth attempt, even though [default=ignore]
+  # keeps it from being fatal.
+  local fprintd_gate=""
+  if command -v omarchy-hw-laptop-closed &>/dev/null; then
+    fprintd_gate="auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed"
+  else
+    warn "omarchy-hw-laptop-closed not found — skipping the clamshell gate in PAM (harmless on desktops)."
+  fi
 
   # sudo: ensure pam_fprintd and clamshell gate are configured in correct sequence
   if ! grep -q pam_fprintd.so /etc/pam.d/sudo 2>/dev/null; then
     info "Configuring sudo for fingerprint authentication..."
     sudo sed -i '1i auth      sufficient pam_fprintd.so' /etc/pam.d/sudo
   fi
-  if ! grep -q 'omarchy-hw-laptop-closed' /etc/pam.d/sudo 2>/dev/null; then
+  if [[ -n "$fprintd_gate" ]] && ! grep -q 'omarchy-hw-laptop-closed' /etc/pam.d/sudo 2>/dev/null; then
     sudo sed -i "/pam_fprintd\.so/i $fprintd_gate" /etc/pam.d/sudo
   fi
 
@@ -154,12 +276,12 @@ setup_pam_integration() {
       info "Configuring polkit for fingerprint authentication..."
       sudo sed -i '1i auth      sufficient pam_fprintd.so' /etc/pam.d/polkit-1
     fi
-    if ! grep -q 'omarchy-hw-laptop-closed' /etc/pam.d/polkit-1 2>/dev/null; then
+    if [[ -n "$fprintd_gate" ]] && ! grep -q 'omarchy-hw-laptop-closed' /etc/pam.d/polkit-1 2>/dev/null; then
       sudo sed -i "/pam_fprintd\.so/i $fprintd_gate" /etc/pam.d/polkit-1
     fi
   else
     sudo tee /etc/pam.d/polkit-1 >/dev/null <<EOF
-$fprintd_gate
+${fprintd_gate}
 auth      sufficient pam_fprintd.so
 auth      required pam_unix.so
 
@@ -167,6 +289,30 @@ account   required pam_unix.so
 password  required pam_unix.so
 session   required pam_unix.so
 EOF
+  fi
+
+  # Sanity check: a PAM edit should only ever grow these files (we insert
+  # lines, never delete any). If either file came out shorter than its
+  # backup, something went wrong — restore immediately rather than leaving
+  # a possibly-broken auth stack in place.
+  local orig_lines new_lines
+  if [[ -f "$PAM_BACKUP_DIR/sudo" ]]; then
+    orig_lines=$(wc -l < "$PAM_BACKUP_DIR/sudo")
+    new_lines=$(wc -l < /etc/pam.d/sudo)
+    if (( new_lines < orig_lines )); then
+      warn "/etc/pam.d/sudo has fewer lines after edit than before edit — restoring backup as a precaution."
+      restore_pam_backup
+      fail "Aborting for safety. No PAM changes were left in place."
+    fi
+  fi
+  if [[ -f "$PAM_BACKUP_DIR/polkit-1" ]]; then
+    orig_lines=$(wc -l < "$PAM_BACKUP_DIR/polkit-1")
+    new_lines=$(wc -l < /etc/pam.d/polkit-1)
+    if (( new_lines < orig_lines )); then
+      warn "/etc/pam.d/polkit-1 has fewer lines after edit than before edit — restoring backup as a precaution."
+      restore_pam_backup
+      fail "Aborting for safety. No PAM changes were left in place."
+    fi
   fi
 
   # lock screen (Quickshell session lock):
@@ -200,7 +346,7 @@ if omarchy-hw-fingerprint; then
       warn "Fingerprint enrollments disappear after first verify without the patched driver."
       echo
 
-      if confirm "Install libfprint-egismoc-sdcp-git from AUR? (replaces stock libfprint)" true; then
+      if confirm "Install libfprint-egismoc-sdcp-git from AUR? (replaces stock libfprint; a fresh build runs with --noconfirm, skipping PKGBUILD review)" true; then
         # Prefer a pre-compiled binary from the local dotfiles repo, user archive, or pacman cache.
         # This avoids the appstreamcli network-test failure during compilation.
         CACHED_PKG=$(find "$DOTFILES_DIR/packages" "$HOME/.local/share/packages" /var/cache/pacman/pkg \
@@ -208,10 +354,18 @@ if omarchy-hw-fingerprint; then
 
         if [[ -n "$CACHED_PKG" ]]; then
           info "Found pre-compiled package: $CACHED_PKG"
+          info "Package sha256: $(sha256sum "$CACHED_PKG" | awk '{print $1}')"
           # --ask=4 answers the "Remove libfprint?" conflict prompt with yes
           sudo pacman -U --noconfirm --ask=4 "$CACHED_PKG"
           archive_driver_pkg "$CACHED_PKG"
         else
+          # Building from source touches the network (AUR + any deps) — check
+          # reachability first instead of failing deep inside a yay build.
+          if command -v omarchy-pkg-aur-accessible &>/dev/null && ! omarchy-pkg-aur-accessible; then
+            fail "AUR is unreachable — cannot build libfprint-egismoc-sdcp-git. Check your network and re-run."
+          fi
+          command -v yay &>/dev/null || fail "yay is not installed — cannot build libfprint-egismoc-sdcp-git from AUR."
+
           info "Compiling from AUR (bypassing appstream network test)..."
           # Remove stock libfprint first (deps-only so fprintd stays if present)
           if pacman -Q libfprint &>/dev/null && ! pacman -Q libfprint-egismoc-sdcp-git &>/dev/null; then
@@ -246,12 +400,6 @@ if omarchy-hw-fingerprint; then
 
   # Ensure PAM integration is configured (sudo, polkit, lock screen with clamshell gate)
   setup_pam_integration
-
-  # Warm up sudo credentials before checking root prints so prompts are explicit
-  if ! sudo -n true 2>/dev/null; then
-    info "Sudo privileges needed for hardware authentication setup..."
-    sudo -v
-  fi
 
   CURRENT_USER="${USER:-$(id -un)}"
 
@@ -417,31 +565,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 6: Omarchy Shell Plugins
+# Step 6: Reload Desktop Services
 # ---------------------------------------------------------------------------
-log "Step 6 · Omarchy Shell Plugins"
-
-PLUGINS=(
-  "agx.screen-time:https://github.com/ax1g/quickshell-screentime-plugin.git"
-  "crmne.hyprmoncfg:https://github.com/crmne/omarchy-hyprmoncfg.git"
-  "ssupt.bluetooth-audio:https://github.com/ssupt/omarchy-bluetooth-audio.git"
-)
-
-for entry in "${PLUGINS[@]}"; do
-  plugin_id="${entry%%:*}"
-  plugin_url="${entry#*:}"
-  if [[ -d "$HOME/.config/omarchy/plugins/$plugin_id" ]]; then
-    info "Plugin '$plugin_id' is already installed."
-  else
-    info "Installing plugin: $plugin_id..."
-    omarchy plugin add "$plugin_url" --enable --yes 2>/dev/null || warn "Could not install plugin $plugin_id"
-  fi
-done
-
-# ---------------------------------------------------------------------------
-# Step 7: Reload Desktop Services
-# ---------------------------------------------------------------------------
-log "Step 7 · Reload Services"
+log "Step 6 · Reload Services"
 
 systemctl --user daemon-reload 2>/dev/null || true
 systemctl --user restart wireplumber 2>/dev/null || true
@@ -456,11 +582,25 @@ if command -v omarchy &>/dev/null; then
   info "Omarchy shell restarted."
 fi
 
-# Clean up empty backup directory
+# Clean up empty backup directories
+if [[ -d "$PAM_BACKUP_DIR" ]] && [[ -z "$(ls -A "$PAM_BACKUP_DIR" 2>/dev/null)" ]]; then
+  rmdir "$PAM_BACKUP_DIR" 2>/dev/null || true
+fi
 if [[ -d "$BACKUP_DIR" ]] && [[ -z "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]]; then
   rmdir "$BACKUP_DIR" 2>/dev/null || true
 elif [[ -d "$BACKUP_DIR" ]]; then
   info "Previous configs backed up to: $BACKUP_DIR"
+fi
+
+# Final sanity check: confirm sudo still works before you close this terminal.
+# This is the single most important check after a PAM edit — if it fails,
+# do NOT close this window; open a fresh root shell (or use the backup at
+# $PAM_BACKUP_DIR) to fix /etc/pam.d/sudo before you lose your only sudo session.
+if sudo -v 2>/dev/null; then
+  info "sudo access confirmed working after setup."
+else
+  warn "Could not confirm sudo still works! Do NOT close this terminal."
+  warn "Backups of the pre-edit PAM files are at: $PAM_BACKUP_DIR"
 fi
 
 log "Setup complete!"

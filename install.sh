@@ -91,6 +91,7 @@ confirm() {
 restore_pam_backup() {
   [[ -f "$PAM_BACKUP_DIR/sudo" ]] && sudo cp "$PAM_BACKUP_DIR/sudo" /etc/pam.d/sudo
   [[ -f "$PAM_BACKUP_DIR/polkit-1" ]] && sudo cp "$PAM_BACKUP_DIR/polkit-1" /etc/pam.d/polkit-1
+  [[ -f "$PAM_BACKUP_DIR/.polkit-1-created" ]] && sudo rm -f /etc/pam.d/polkit-1
   info "PAM files restored from $PAM_BACKUP_DIR."
 }
 
@@ -117,6 +118,16 @@ LOCK_DIR="$HOME/.cache/omarchy-dotfiles-install.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   fail "Another instance of install.sh appears to be running (found $LOCK_DIR). Remove it manually if that's not the case."
 fi
+
+cleanup() {
+  if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
+    kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+  fi
+  if [[ -d "${LOCK_DIR:-}" ]]; then
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # Environment guards — confirm this is actually an Omarchy install, and
@@ -146,11 +157,10 @@ else
 fi
 
 # Keep sudo alive for the whole run instead of letting the timestamp expire
-# mid-script and re-prompting unexpectedly. Killed automatically on exit.
+# mid-script and re-prompting unexpectedly. Killed automatically on exit via cleanup().
 sudo -v
 ( while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
 SUDO_KEEPALIVE_PID=$!
-trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 # ---------------------------------------------------------------------------
 # Step 1: Official Packages (Omarchy repo + Arch core/extra)
@@ -164,6 +174,8 @@ OFFICIAL_PKGS=(
   omarchy-zsh           # Omarchy repo: zsh + starship + eza + zoxide + fzf + bat + fd + mise + zsh-syntax-highlighting
   zsh-autosuggestions   # extra: fish-like autosuggestions for zsh
   usbutils              # core: lsusb for hardware discovery
+  restic                # extra: deduplicating backup tool (Omarchy Time Machine backend)
+  rclone                # extra: cloud storage sync (Google Drive, B2, S3 backend for Time Machine)
 )
 
 if omarchy-pkg-missing "${OFFICIAL_PKGS[@]}"; then
@@ -196,6 +208,8 @@ fi
 # ---------------------------------------------------------------------------
 log "Step 2 · Check Fingerprint Hardware"
 
+HAS_EGISMOC=0
+
 archive_driver_pkg() {
   local pkg="$1"
   [[ -n "$pkg" && -f "$pkg" ]] || return 0
@@ -206,20 +220,25 @@ archive_driver_pkg() {
   # overwrite the archived copy — that shouldn't happen with a pinned AUR
   # git package and is worth a human looking at.
   local checksum_file="$DOTFILES_DIR/packages/.sha256sums"
-  local pkg_name pkg_hash recorded_hash
+  local pkg_name pkg_hash recorded_hash=""
   pkg_name="$(basename "$pkg")"
   pkg_hash="$(sha256sum "$pkg" | awk '{print $1}')"
 
   if [[ -f "$checksum_file" ]]; then
     recorded_hash="$(grep -F " $pkg_name" "$checksum_file" 2>/dev/null | awk '{print $1}' || true)"
-    if [[ -n "$recorded_hash" && "$recorded_hash" != "$pkg_hash" ]]; then
-      warn "Checksum mismatch for $pkg_name vs. previously archived copy — NOT overwriting automatically."
-      warn "Verify this binary manually before trusting it (recorded: ${recorded_hash:0:12}..., now: ${pkg_hash:0:12}...)."
-      return 0
+    if [[ -n "$recorded_hash" ]]; then
+      if [[ "$recorded_hash" != "$pkg_hash" ]]; then
+        warn "Checksum mismatch for $pkg_name vs. previously archived copy — NOT overwriting automatically."
+        warn "Verify this binary manually before trusting it (recorded: ${recorded_hash:0:12}..., now: ${pkg_hash:0:12}...)."
+        return 0
+      fi
+      # Recorded hash matches current binary hash — avoid appending duplicate entries
     fi
   fi
 
-  echo "$pkg_hash $pkg_name" >> "$checksum_file"
+  if [[ -z "$recorded_hash" ]]; then
+    echo "$pkg_hash $pkg_name" >> "$checksum_file"
+  fi
   cp -n "$pkg" "$DOTFILES_DIR/packages/" 2>/dev/null || true
   cp -n "$pkg" "$HOME/.local/share/packages/" 2>/dev/null || true
   sudo cp -n "$pkg" /var/cache/pacman/pkg/ 2>/dev/null || true
@@ -248,18 +267,35 @@ setup_pam_integration() {
   # global error trap (on_error) uses to auto-restore if anything below fails.
   mkdir -p "$PAM_BACKUP_DIR"
   [[ -f /etc/pam.d/sudo ]] && cp "/etc/pam.d/sudo" "$PAM_BACKUP_DIR/sudo"
-  [[ -f /etc/pam.d/polkit-1 ]] && cp "/etc/pam.d/polkit-1" "$PAM_BACKUP_DIR/polkit-1"
+  if [[ -f /etc/pam.d/polkit-1 ]]; then
+    cp "/etc/pam.d/polkit-1" "$PAM_BACKUP_DIR/polkit-1"
+  else
+    touch "$PAM_BACKUP_DIR/.polkit-1-created"
+  fi
 
   # Only wire in the laptop-closed clamshell gate if the binary actually
   # exists on this system — pam_exec pointed at a missing binary logs a
   # failure on every single auth attempt, even though [default=ignore]
   # keeps it from being fatal.
+  # quiet_log is required in addition to quiet to suppress syslog/journald
+  # level-3 errors when omarchy-hw-laptop-closed exits 1 (lid open).
   local fprintd_gate=""
   if command -v omarchy-hw-laptop-closed &>/dev/null; then
-    fprintd_gate="auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed"
+    fprintd_gate="auth      [success=1 default=ignore] pam_exec.so quiet quiet_log /usr/bin/omarchy-hw-laptop-closed"
   else
     warn "omarchy-hw-laptop-closed not found — skipping the clamshell gate in PAM (harmless on desktops)."
   fi
+
+  # Upgrade existing clamshell gate to include quiet_log if configured without it
+  local pam_file
+  for pam_file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
+    if [[ -f "$pam_file" ]] && grep -q 'omarchy-hw-laptop-closed' "$pam_file" 2>/dev/null; then
+      if ! grep -q 'quiet_log' "$pam_file" 2>/dev/null; then
+        sudo sed -i 's/pam_exec\.so quiet \/usr\/bin\/omarchy-hw-laptop-closed/pam_exec.so quiet quiet_log \/usr\/bin\/omarchy-hw-laptop-closed/' "$pam_file"
+        info "Upgraded $(basename "$pam_file") PAM clamshell gate with quiet_log."
+      fi
+    fi
+  done
 
   # sudo: ensure pam_fprintd and clamshell gate are configured in correct sequence
   if ! grep -q pam_fprintd.so /etc/pam.d/sudo 2>/dev/null; then
@@ -328,6 +364,80 @@ EOF
   fi
 }
 
+setup_egismoc_lock_plugin() {
+  local current_user="${USER:-$(id -un)}"
+  local user_lock_dir="$HOME/.config/omarchy/plugins/${current_user}.lock"
+  local stock_lock_dir="/usr/share/omarchy/shell/plugins/lock"
+
+  [[ -d "$stock_lock_dir" ]] || return 0
+
+  info "Configuring EgisTec MOC lockscreen retry delay (1500ms)..."
+
+  # 1. Ensure user-level cloned lock plugin exists
+  if [[ ! -d "$user_lock_dir" ]]; then
+    mkdir -p "$user_lock_dir"
+    cp -aL "$stock_lock_dir/." "$user_lock_dir/"
+
+    cat > "$user_lock_dir/manifest.json" <<EOF
+{
+  "schemaVersion": 1,
+  "id": "${current_user}.lock",
+  "name": "My Lock Screen",
+  "version": "1.0.0",
+  "author": "Omarchy",
+  "description": "Quickshell session lock with separate password and fingerprint PAM flows.",
+  "omarchy": {
+    "capabilities": [
+      "authentication"
+    ],
+    "clonedFrom": "omarchy.lock"
+  },
+  "kinds": [
+    "service"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}
+EOF
+    info "Cloned omarchy.lock to $user_lock_dir."
+  fi
+
+  # 2. Patch fingerprintRetryTimer interval to 1500ms in Service.qml
+  # EgisTec MOC sensor needs ~1.5s to reset its USB endpoint and state machine
+  # after a 60s idle timeout; 250ms causes assertion crash (self->task_ssm == NULL).
+  if [[ -f "$user_lock_dir/Service.qml" ]]; then
+    if ! grep -q "interval: 1500" "$user_lock_dir/Service.qml" 2>/dev/null; then
+      sed -i '/id: fingerprintRetryTimer/,/repeat:/ s/interval: [0-9]\+/interval: 1500/' "$user_lock_dir/Service.qml"
+      info "Patched fingerprintRetryTimer interval to 1500ms in $user_lock_dir/Service.qml."
+    fi
+  fi
+
+  # 3. Ensure shell.json enables ${current_user}.lock and disables omarchy.lock
+  activate_egismoc_lock_shell
+}
+
+activate_egismoc_lock_shell() {
+  local current_user="${USER:-$(id -un)}"
+  local shell_conf="$HOME/.config/omarchy/shell.json"
+
+  if [[ -f "$shell_conf" ]] && command -v jq &>/dev/null; then
+    local tmp_conf
+    tmp_conf=$(mktemp)
+    jq --arg id "${current_user}.lock" '
+      .plugins = ((.plugins // []) | if any(.[]; .id == $id) then . else . + [{"id": $id}] end) |
+      .disabledPlugins = ((.disabledPlugins // []) | if index("omarchy.lock") then . else . + ["omarchy.lock"] end) |
+      .cloneSourceRestores = ((.cloneSourceRestores // []) | if index($id) then . else . + [$id] end)
+    ' "$shell_conf" > "$tmp_conf" && mv "$tmp_conf" "$shell_conf"
+    info "Activated ${current_user}.lock in $shell_conf."
+  fi
+
+  if command -v omarchy-shell &>/dev/null && OMARCHY_SHELL_IPC_TIMEOUT=1s omarchy-shell shell ping &>/dev/null; then
+    omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+  fi
+}
+
 # Use Omarchy's own hardware detection rather than parsing lsusb manually.
 if omarchy-hw-fingerprint; then
   info "Fingerprint sensor detected."
@@ -337,7 +447,8 @@ if omarchy-hw-fingerprint; then
   # Check the USB bus for the specific EgisTec MOC vendor:product IDs.
   EGISMOC_IDS="1c7a:0582|1c7a:0583|1c7a:0584|1c7a:0586|1c7a:0587|1c7a:05a1|1c7a:05a5"
 
-  if lsusb | grep -qE "$EGISMOC_IDS"; then
+  if lsusb | grep -qE "$EGISMOC_IDS" || pacman -Q libfprint-egismoc-sdcp-git &>/dev/null; then
+    HAS_EGISMOC=1
     info "EgisTec Match-on-Chip sensor detected — requires SDCP driver."
 
     if ! pacman -Q libfprint-egismoc-sdcp-git &>/dev/null; then
@@ -400,6 +511,11 @@ if omarchy-hw-fingerprint; then
 
   # Ensure PAM integration is configured (sudo, polkit, lock screen with clamshell gate)
   setup_pam_integration
+
+  # Configure EgisTec MOC lockscreen retry delay (1500ms) to prevent USB timeout assertion crashes
+  if (( HAS_EGISMOC )); then
+    setup_egismoc_lock_plugin
+  fi
 
   CURRENT_USER="${USER:-$(id -un)}"
 
@@ -528,6 +644,11 @@ fi
 # Shell rc files
 [[ -f "$DOTFILES_DIR/.bashrc" ]] && sync_item "$DOTFILES_DIR/.bashrc" "$HOME/.bashrc"
 [[ -f "$DOTFILES_DIR/.zshrc" ]]  && sync_item "$DOTFILES_DIR/.zshrc"  "$HOME/.zshrc"
+
+# Re-activate EgisTec MOC lockscreen plugin in shell.json if dotfiles deployment touched shell.json
+if (( HAS_EGISMOC )); then
+  activate_egismoc_lock_shell
+fi
 
 # ---------------------------------------------------------------------------
 # Step 5: SSH Agent (Arch-native systemd socket activation)

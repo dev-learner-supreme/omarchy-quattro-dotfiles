@@ -47,9 +47,6 @@
           "id": "omarchy.tray"
         },
         {
-          "id": "io.github.aryan-techie.todoist"
-        },
-        {
           "id": "crmne.hyprmoncfg"
         },
         {
@@ -70,9 +67,6 @@
         {
           "id": "omarchy.power",
           "showPercentage": true
-        },
-        {
-          "id": "jankeesvw.notification-center"
         }
       ]
     }

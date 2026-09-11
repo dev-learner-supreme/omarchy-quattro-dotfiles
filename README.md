@@ -128,6 +128,7 @@ What *does* stay contained to your user account:
 ## Documentation Guides
 
 - [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md) — complete setup architecture, package breakdown, EgisTec fingerprint configuration, and recovery instructions
+- [SYSTEM_HEALTH_AND_AUTH_AUDIT.md](SYSTEM_HEALTH_AND_AUTH_AUDIT.md) — comprehensive system health inspection, PAM & fprintd architecture, journalctl analysis, and upstream comparison
 - [SSH_SETUP_GUIDE.md](SSH_SETUP_GUIDE.md) — native Arch & Omarchy SSH key generation, systemd user socket activation, and session auto-load guide
 
 ---

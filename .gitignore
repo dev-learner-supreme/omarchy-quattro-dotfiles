@@ -4,3 +4,9 @@
 *.lock
 .DS_Store
 .dotfiles-backup/
+
+# makepkg artifacts from a manual build in packages/libfprint-egismoc-sdcp/
+packages/libfprint-egismoc-sdcp/src/
+packages/libfprint-egismoc-sdcp/pkg/
+packages/libfprint-egismoc-sdcp/libfprint-egismoc-sdcp/
+packages/libfprint-egismoc-sdcp/*.pkg.tar.zst

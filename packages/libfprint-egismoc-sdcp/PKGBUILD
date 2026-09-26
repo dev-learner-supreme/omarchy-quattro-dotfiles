@@ -1,0 +1,96 @@
+# Maintainer: Arun Rao Balappa <arunraobalappa@gmail.com> (personal build, not published to AUR)
+#
+# SDCP fork by TenSeventy7: https://github.com/TenSeventy7/libfprint-egismoc-sdcp
+# OpenSSL linkage fix by antoskuu: https://github.com/antoskuu/libfprint-egismoc-sdcp-fix
+# Packaging adapted from mandalb's AUR libfprint-egismoc-sdcp-git
+#
+# Pinned to a single commit instead of tracking upstream HEAD. The package name
+# keeps the "-git" suffix on purpose: install.sh, the IgnorePkg lock, the Omarchy
+# update hooks and the archived binary in ../ all key on this exact name.
+#
+# Target: Acer Swift Go 14 (SFG14-71), EgisTec/LighTuning ETU905A88-E, USB 1c7a:0584.
+# Commit 4d128d4 (2025-07-29, "data: Remove restriction for 1c7a:0584") is where
+# upstream finished enabling this sensor; it is also the build that produced
+# ../libfprint-egismoc-sdcp-git-r1831.4d128d4-1-x86_64.pkg.tar.zst.
+# Independent confirmation on the same sensor:
+# https://github.com/TenSeventy7/libfprint-egismoc-sdcp/issues/7
+#
+# To move to a newer upstream commit: change _pin_commit and pkgver, then rebuild.
+
+pkgname=libfprint-egismoc-sdcp-git
+_pin_commit=4d128d4f6f0b46182572126e84df88a73ac27859
+pkgver=r1831.4d128d4
+pkgrel=1
+pkgdesc="libfprint with SDCP support for EgisTec egismoc sensors (pinned for Acer Swift Go 14, 1c7a:0584)"
+url="https://github.com/TenSeventy7/libfprint-egismoc-sdcp"
+arch=(x86_64)
+license=(LGPL-2.1-or-later)
+
+depends=(
+  gcc-libs
+  glib2
+  glibc
+  libgudev
+  libgusb
+  openssl
+  pixman
+)
+makedepends=(
+  git
+  glib2-devel
+  gobject-introspection
+  meson
+)
+checkdepends=(
+  cairo
+  umockdev
+)
+
+provides=(libfprint libfprint-2.so)
+conflicts=(libfprint)
+groups=(fprint)
+
+source=("libfprint-egismoc-sdcp::git+https://github.com/TenSeventy7/libfprint-egismoc-sdcp.git#commit=${_pin_commit}")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd libfprint-egismoc-sdcp
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd libfprint-egismoc-sdcp
+
+  # SDCP code uses OpenSSL EVP_* but meson only links OpenSSL for uru4000,
+  # so egismoc fails to link without this (upstream issues #10, #14, #15).
+  if ! grep -q "'egismoc' : \[ 'openssl' \]" meson.build; then
+    sed -i "/'uru4000' : \[ 'openssl' \],/a\\    'egismoc' : [ 'openssl' ]," meson.build
+  fi
+
+  # metainfo-validate fails only on a network URL-reachability warning
+  # (upstream issue #8); validate offline instead of skipping the whole suite.
+  if ! grep -q "'--no-net'" tests/meson.build; then
+    sed -i "s/args: \['validate', metainfo_generator\]/args: ['validate', '--no-net', metainfo_generator]/" tests/meson.build
+  fi
+}
+
+build() {
+  local meson_options=(
+    -D drivers=egismoc
+    -D doc=false
+    -D gtk-examples=false
+    -D installed-tests=false
+  )
+  arch-meson libfprint-egismoc-sdcp build "${meson_options[@]}"
+  meson compile -C build
+}
+
+check() {
+  meson test -C build --print-errorlogs
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+}
+
+# vim:set sw=2 sts=-1 et:

@@ -16,7 +16,7 @@ source "$OMARCHY_PATH/default/bash/rc"
 
 
 # Added by Antigravity CLI installer
-export PATH="/home/arun/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 
 # Android SDK & Tooling
 export ANDROID_HOME="$HOME/Android/Sdk"

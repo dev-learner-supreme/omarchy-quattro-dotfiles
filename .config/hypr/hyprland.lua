@@ -29,6 +29,3 @@ require("default.hypr.toggles")
 -- Android Emulator window rules (floating, full opacity, preserve aspect ratio)
 o.window("class:^(Emulator)$", { float = true, tag = "-default-opacity", opacity = "1 1" })
 o.window("class:^(qemu-system-.*)$", { float = true, tag = "-default-opacity", opacity = "1 1" })
-
--- Added by hyprmoncfg: its generated monitor rules load last, so nothing before this can override the applied layout.
-dofile(os.getenv("HOME") .. "/.config/hypr/hyprmoncfg-monitors.lua")

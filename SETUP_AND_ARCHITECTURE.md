@@ -158,11 +158,9 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 │   ├── hypr/
 │   │   ├── bindings.lua           # F7, F8, Super+Shift+S, Alt+Space
 │   │   ├── hyprland.lua           # Emulator/QEMU window rules
-│   │   ├── input.lua, looknfeel.lua, monitors.lua, autostart.lua
-│   │   └── hyprmoncfg-monitors.lua
+│   │   └── input.lua, looknfeel.lua, monitors.lua, autostart.lua
 │   ├── omarchy/
 │   │   ├── shell.json             # Status bar layout & widgets
-│   │   ├── themes/                # awsm-changi, luminous, sora-koi
 │   │   ├── hooks/theme-set        # Theme change automation
 │   │   ├── hooks/{pre-refresh-pacman,post-update,post-boot}.d/  # Driver pin + health check
 │   │   └── extensions/omarchy-menu.jsonc  # Routes Setup > Security > Fingerprint

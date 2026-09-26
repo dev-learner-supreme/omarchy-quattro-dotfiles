@@ -31,7 +31,7 @@ Personal Hyprland / Omarchy Quattro configuration and installer, structured for 
 | Component | Path | Highlights |
 |---|---|---|
 | Hyprland | `.config/hypr/` | Custom keybindings (`bindings.lua`), window rules for Android Emulator / QEMU (floating, full opacity), input & look'n'feel overrides |
-| Omarchy Shell | `.config/omarchy/` *(optional)* | Bar/widget layout (`shell.json`), custom themes (`awsm-changi`, `luminous`, `sora-koi`), menu extensions (`omarchy-menu.jsonc`), theme-set automation hooks |
+| Omarchy Shell | `.config/omarchy/` *(optional)* | Bar/widget layout (`shell.json`), menu extensions (`omarchy-menu.jsonc`), theme-set automation hooks |
 | Audio (WirePlumber) | `.config/wireplumber/`, `.local/share/wireplumber/` | Sink priority rules, dynamic hardware jack autoswitcher (`sof-autoswitch.lua`), Bluetooth A2DP autoconnect |
 | Terminals & Shell Tools | various | Ghostty, Alacritty, Kitty, Foot configs; Starship, btop, lazygit, git config; `.bashrc` / `.zshrc` |
 

@@ -40,7 +40,7 @@ LOCK_RETRY_MS=1500
 
 PAM_FILES=(sudo polkit-1 omarchy-lock-fingerprint)
 FP_LINES_RE='pam_fprintd[.]so|omarchy-hw-laptop-closed'
-PAM_BACKUP_DIR="${EGISMOC_PAM_BACKUP_DIR:-$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)/pam}"
+PAM_BACKUP_DIR="${EGISMOC_PAM_BACKUP_DIR:-$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)-$$/pam}"
 PAM_EDIT_ACTIVE=0
 
 # ------------------------------------------------------------------------------

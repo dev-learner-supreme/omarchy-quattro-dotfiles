@@ -26,10 +26,13 @@ if [[ $EUID -eq 0 ]]; then
 fi
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP_DIR="$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)"
+# The PID keeps two runs in the same second from sharing (and pruning) a folder.
+BACKUP_DIR="$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)-$$"
 ASSUME_YES=0
 # shellcheck source=lib/ui.sh
 source "$DOTFILES_DIR/lib/ui.sh"
+# shellcheck source=lib/dotfiles.sh
+source "$DOTFILES_DIR/lib/dotfiles.sh"
 
 for arg in "$@"; do
   case "$arg" in
@@ -124,42 +127,13 @@ fi
 
 # ---------------------------------------------------------------------------
 # Step 2 · Dotfiles (before fingerprint, so a tracked shell.json can't undo the
-# lock-screen clone that Step 3 enables)
+# lock-screen clone that Step 3 enables). See lib/dotfiles.sh: files changed on
+# this machine since the last deploy are never overwritten without asking, and
+# files deleted from the repo are removed.
 # ---------------------------------------------------------------------------
 log "Step 2 · Deploy Dotfiles"
 
-mkdir -p "$BACKUP_DIR"
-
-sync_item() {
-  local src="$1" dest="$2"
-  mkdir -p "$(dirname "$dest")"
-
-  if [[ -d "$src" ]]; then
-    mkdir -p "$dest"
-    local item
-    for item in "$src"/*; do
-      [[ -e "$item" ]] || continue
-      sync_item "$item" "$dest/$(basename "$item")"
-    done
-    return 0
-  fi
-
-  [[ -f "$dest" ]] && cmp -s "$src" "$dest" && return 0
-  if [[ -f "$dest" && ! -L "$dest" ]]; then
-    mkdir -p "$(dirname "$BACKUP_DIR/${dest#"$HOME"/}")"
-    cp -a "$dest" "$BACKUP_DIR/${dest#"$HOME"/}"
-  fi
-  cp -a "$src" "$dest"
-  info "Deployed: ${dest#"$HOME"/}"
-}
-
-for dir in "$DOTFILES_DIR/.config"/*/ "$DOTFILES_DIR/.local"/*/; do
-  [[ -d "$dir" ]] || continue
-  parent="$(basename "$(dirname "$dir")")"
-  sync_item "$dir" "$HOME/$parent/$(basename "$dir")"
-done
-[[ -f "$DOTFILES_DIR/.bashrc" ]] && sync_item "$DOTFILES_DIR/.bashrc" "$HOME/.bashrc"
-[[ -f "$DOTFILES_DIR/.zshrc" ]]  && sync_item "$DOTFILES_DIR/.zshrc"  "$HOME/.zshrc"
+dotfiles_deploy
 
 # Linked, not copied: the command finds the pinned PKGBUILD and archived
 # driver through its real path in this repo.

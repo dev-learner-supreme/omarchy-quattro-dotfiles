@@ -9,7 +9,10 @@ look successful and then vanish on the first verify. This builds
 which adds SDCP, pinned to commit `4d128d4` — the commit where upstream finished
 enabling `1c7a:0584`, and the same commit the archived binary in `../` was built from.
 
-## How `install.sh` uses it
+## How it gets installed
+
+`egismoc-fingerprint setup` (run by `install.sh`, or from *Setup > Security >
+Fingerprint* in the Omarchy menu) installs it this way:
 
 1. **Archived binary first.** If a `libfprint-egismoc-sdcp-git-*.pkg.tar.zst`
    listed in `../.sha256sums` is found (in `../`, `~/.local/share/packages/` or
@@ -44,8 +47,8 @@ the hooks in `.config/omarchy/hooks/`), so it only ever changes when you do this
 
 ## Authentication wiring
 
-PAM (sudo, polkit, the Quickshell lock screen) is configured by `install.sh`
-Step 2, not by this package. See [SETUP_AND_ARCHITECTURE.md](../../SETUP_AND_ARCHITECTURE.md).
+PAM (sudo, polkit, the Quickshell lock screen) is configured by
+`bin/egismoc-fingerprint`, not by this package. See [SETUP_AND_ARCHITECTURE.md](../../SETUP_AND_ARCHITECTURE.md).
 The password fallback always works: fingerprint is `sufficient`, never `required`,
 for sudo and polkit.
 

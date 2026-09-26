@@ -69,34 +69,58 @@ cd ~/dotfiles
 
 ```bash
 ./install.sh        # interactive — prompts before AUR/optional steps
-./install.sh -y      # unattended — accepts all defaults
+./install.sh -y     # unattended — each prompt takes its default answer
 ```
 
 ### What `install.sh` does
 
-| Step | Action |
-|---|---|
-| Pre-flight | Confirms this is an Omarchy install, warns if the detected version looks pre-Quattro, refuses to run a second instance concurrently, keeps `sudo` alive for the run |
-| 1 | Installs official packages (`omarchy-zsh`, `zsh-autosuggestions`, `usbutils`) and Ghostty |
-| 2 | Detects EgisTec Match-on-Chip fingerprint hardware, installs the SDCP driver (checksum-verified archived binary, or built from the pinned [PKGBUILD](packages/libfprint-egismoc-sdcp/)), configures PAM for sudo / polkit / lock screen — backed up beforehand and rolled back if the edit fails or is interrupted |
-| 3 | Prompts for optional AUR packages (`hyprmoncfg`, `brave-origin-bin`) |
-| 4 | Backs up any conflicting existing configs, then deploys `.config` and `.local` files |
-| 5 | Configures the native SSH agent via systemd socket activation |
-| 6 | Reloads Hyprland, WirePlumber, and the Omarchy Shell; confirms `sudo` still works before exiting |
+It is an orchestrator: wherever Omarchy has a native command for a step, it calls that command, so the result matches what the Omarchy menu would do.
 
-> [!NOTE]
-> Earlier versions of this repo also installed a set of third-party Omarchy Shell plugins during setup. That step has been removed — plugin installation is no longer part of `install.sh`.
+| Step | Action | Omarchy-native pieces |
+|---|---|---|
+| Pre-flight | Confirms Omarchy, warns if pre-Quattro, one run at a time, keeps `sudo` alive | `omarchy version` |
+| 1 | Official packages; Ghostty installed and set as the default terminal | `omarchy pkg add`, `omarchy install terminal`, `omarchy default terminal` |
+| 2 | Backs up conflicting configs, deploys `.config` / `.local`, links `egismoc-fingerprint` into `~/.local/bin` | hooks in `~/.config/omarchy/hooks/*.d`, menu extension |
+| 3 | Fingerprint: EgisTec sensor → `egismoc-fingerprint setup`; any other sensor → Omarchy's own wizard. A failure here doesn't stop the rest | `omarchy-hw-fingerprint`, `omarchy setup security fingerprint`, `omarchy plugin clone` |
+| 4 | Optional AUR packages (`hyprmoncfg`, Brave Origin) | `omarchy pkg aur add`, `omarchy install browser` |
+| 5 | SSH agent via systemd socket activation | — |
+| 6 | Reloads WirePlumber, Hyprland (and reports `hyprctl configerrors`), terminals, and the Omarchy shell | `omarchy restart terminal`, `omarchy restart shell` |
+
+Dotfiles deploy *before* the fingerprint step on purpose: the tracked `shell.json` has an empty `plugins[]`, so deploying it after enabling the cloned lock screen would switch it back off.
+
+## Fingerprint (EgisTec Match-on-Chip)
+
+Omarchy's stock *Setup > Security > Fingerprint* installs `libfprint-git`, which has no SDCP support for EgisTec sensors like this laptop's `1c7a:0584` — prints vanish on the first verify. `bin/egismoc-fingerprint` is the replacement, and it defers to Omarchy's wizard on any other sensor:
+
+```bash
+egismoc-fingerprint setup     # driver, enrollment + verify, PAM, lock screen (re-runnable)
+egismoc-fingerprint status    # read-only report of every piece
+egismoc-fingerprint check     # what the hooks run: no sudo, notifies if the driver was replaced
+```
+
+It's wired into Omarchy in three places:
+
+- **Menu** — `omarchy-menu.jsonc` overrides `setup.security.fingerprint`, so *Setup > Security > Fingerprint* runs this instead of the stock wizard.
+- **Hooks** — `pre-refresh-pacman` keeps the driver in `IgnorePkg`; `post-update` repairs PAM drift; `post-update` and `post-boot` send a clickable *"Fingerprint driver replaced"* notification if anything swaps the driver out. All are no-ops on machines without the SDCP driver.
+- **Lock screen** — a native `omarchy plugin clone omarchy.lock` with the retry delay raised to 1500ms (the sensor needs it to reset).
+
+Like Omarchy's own setup, PAM is only edited after a print is enrolled *and* verified.
+
+## Working on this repo with Claude Code
+
+[`CLAUDE.md`](CLAUDE.md) (also `AGENTS.md`) gives coding agents the repo layout and the hard rules — above all, never run the stock fingerprint wizard or install `libfprint-git` on the laptop. On Omarchy it complements the built-in `omarchy` skill that Claude Code already loads for `~/.config` work.
 
 ---
 
 ## Safety Guards
 
-`install.sh` treats anything touching authentication or system packages as higher-risk than plain dotfile syncing, and guards accordingly:
+Anything touching authentication or system packages is treated as higher-risk than plain dotfile syncing (the PAM and driver guards live in `bin/egismoc-fingerprint`):
 
 | Guard | What it protects against |
 |---|---|
 | Lockfile (`~/.cache/omarchy-dotfiles-install.lock`) | Two copies of the installer running at once; a lock left by a killed run is detected by PID and cleared |
-| `sudo` keep-alive | The `sudo` timestamp expiring mid-run and re-prompting unpredictably |
+| `sudo` keep-alive | The `sudo` timestamp expiring mid-run; detached from stdout so `./install.sh \| tee log` doesn't hang at the end |
+| Enroll before PAM | PAM is only touched once a print is enrolled and verified, so auth never points at a sensor that can't match |
 | PAM backup before edit | `/etc/pam.d/sudo`, `polkit-1` and `omarchy-lock-fingerprint` are copied to `~/.dotfiles-backup/<timestamp>/pam/` before any edit |
 | Scoped auto-restore | If the PAM edit fails or is interrupted (Ctrl-C), all three files are restored. A later, unrelated failure (e.g. Step 5) leaves a completed PAM setup alone |
 | PAM sanity checks | Edits only ever insert lines, and sudo/polkit must still reach `system-auth`/`pam_unix` (password fallback); either check failing triggers an immediate restore |
@@ -110,17 +134,17 @@ cd ~/dotfiles
 ## Security & Omarchy Update Safety
 
 > [!IMPORTANT]
-> This installer is **not** limited to `$HOME`. Step 2 (fingerprint setup) makes real changes outside your home directory:
+> This installer is **not** limited to `$HOME`. Step 3 (fingerprint setup, on EgisTec hardware) makes real changes outside your home directory:
 > - Edits `/etc/pam.d/sudo` and `/etc/pam.d/polkit-1` to add fingerprint authentication
 > - Writes `/etc/pam.d/omarchy-lock-fingerprint` for the session lock screen
 > - May edit `/etc/pacman.conf` (`IgnorePkg`) to pin the fingerprint driver against updates
 > - Installs a system package (`libfprint-egismoc-sdcp-git`) via `pacman -U`, replacing stock `libfprint` — see [packages/libfprint-egismoc-sdcp/](packages/libfprint-egismoc-sdcp/) for the pinned recipe
 >
-> These changes are backed up automatically and rolled back on failure (see [Safety Guards](#safety-guards)), but they are genuine system-level edits — review Step 2 in [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md) before running on a new machine, particularly one without EgisTec fingerprint hardware where this step should just no-op.
+> These changes are backed up automatically and rolled back on failure (see [Safety Guards](#safety-guards)), but they are genuine system-level edits. On a machine without an EgisTec sensor this step makes none of them: it defers to Omarchy's own wizard, or skips.
 
 What *does* stay contained to your user account:
 
-- Everything deployed in Step 4 lives strictly under `$HOME/.config/` and `$HOME/.local/`
+- Everything deployed in Step 2 lives strictly under `$HOME/.config/` and `$HOME/.local/`
 - `omarchy update` will not overwrite anything this repo deploys under `.config`/`.local` — those are user files by Omarchy convention
 - No secrets are committed: API tokens, credentials, and private keys are excluded and expected to live in standard local state paths (`~/.local/state/`)
 
@@ -128,6 +152,8 @@ What *does* stay contained to your user account:
 
 ## Documentation Guides
 
+- [CLAUDE.md](CLAUDE.md) — guide for coding agents (Claude Code, Codex via `AGENTS.md`)
+- [packages/libfprint-egismoc-sdcp/](packages/libfprint-egismoc-sdcp/) — the pinned driver recipe and how to bump it
 - [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md) — complete setup architecture, package breakdown, EgisTec fingerprint configuration, and recovery instructions
 - [SYSTEM_HEALTH_AND_AUTH_AUDIT.md](SYSTEM_HEALTH_AND_AUTH_AUDIT.md) — comprehensive system health inspection, PAM & fprintd architecture, journalctl analysis, and upstream comparison
 - [SSH_SETUP_GUIDE.md](SSH_SETUP_GUIDE.md) — native Arch & Omarchy SSH key generation, systemd user socket activation, and session auto-load guide

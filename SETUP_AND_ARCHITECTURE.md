@@ -67,21 +67,39 @@ Stock `libfprint` lacks the full **SDCP (Secure Device Connection Protocol)** ha
 for EgisTec Match-on-Chip sensors (`1c7a:0582`–`05a5`). Without it, the sensor's
 cryptographic key desyncs and enrollments disappear after the first verification.
 
+Omarchy's own *Setup > Security > Fingerprint* (`omarchy setup security fingerprint`)
+installs `libfprint-git` from the Omarchy package repo. As of September 2026 that
+package carries only FocalTech patches, and upstream's egismoc SDCP work
+(libfprint MR !547) is still unmerged — so the stock wizard reinstates the broken
+behavior on this laptop. **Don't run it here.**
+
 ### Applied Solution
+Everything below is done by `bin/egismoc-fingerprint setup` (linked to
+`~/.local/bin`), which the menu's *Setup > Security > Fingerprint* entry is
+overridden to run. On any other sensor it hands off to Omarchy's wizard.
+
 1. **Driver**: `libfprint-egismoc-sdcp-git`, built from this repo's own
    [pinned PKGBUILD](packages/libfprint-egismoc-sdcp/) (TenSeventy7's SDCP
-   fork at commit `4d128d4`) — not from the AUR. `install.sh` prefers the
-   archived binary, and installs it only if its sha256 matches
-   `packages/.sha256sums`.
+   fork at commit `4d128d4`) — not from the AUR. The archived binary is
+   preferred, and installed only if its sha256 matches `packages/.sha256sums`.
 2. **Update Lock**: [`/etc/pacman.conf`](file:///etc/pacman.conf) —
    `IgnorePkg = libfprint libfprint-egismoc-sdcp-git`.
    Prevents `omarchy update`, `pacman -Syu`, and `yay -Sua` from overwriting.
 3. **Offline Archive**: Pre-compiled `.pkg.tar.zst` in `packages/`,
    `/var/cache/pacman/pkg/` and `~/.local/share/packages/` for offline
    reinstallation.
-4. **PAM Integration**: `auth sufficient pam_fprintd.so` in sudo/polkit/lock,
-   with clamshell gate (`omarchy-hw-laptop-closed`) that skips fingerprint
-   when the laptop lid is closed.
+4. **PAM Integration** (only after a print is enrolled *and* verified):
+   `auth sufficient pam_fprintd.so` in sudo/polkit/lock, with Omarchy's
+   clamshell gate (`omarchy-hw-laptop-closed`, plus `quiet_log`) that skips
+   fingerprint when the lid is closed. The lock screen's PAM has no fprintd
+   timeout, to avoid a driver assertion loop when it re-arms.
+5. **Lock screen**: `omarchy plugin clone omarchy.lock` → `<user>.lock`, with the
+   fingerprint retry raised from 250ms to 1500ms (the sensor needs it to reset).
+6. **Health check**: the `post-update` and `post-boot` hooks run
+   `egismoc-fingerprint check`, which raises a clickable notification if the
+   driver has been replaced and re-applies the lock-screen patch if it drifted.
+
+Check every piece at once with `egismoc-fingerprint status`.
 
 > [!IMPORTANT]
 > **Password fallback is always available.** If the sensor fails, times out,
@@ -127,7 +145,11 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 
 ```
 .
-├── install.sh                     # This setup script
+├── install.sh                     # This setup script (orchestrator)
+├── bin/egismoc-fingerprint        # EgisTec fingerprint setup/status/check → ~/.local/bin
+├── lib/ui.sh                      # Shared prompt/log/sudo helpers
+├── packages/                      # Pinned driver PKGBUILD + checksum-verified binary
+├── CLAUDE.md (AGENTS.md)          # Guide for coding agents
 ├── SETUP_AND_ARCHITECTURE.md      # This guide
 ├── .bashrc                        # SSH socket + Android SDK
 ├── .zshrc                         # Starship + eza aliases + zsh plugins
@@ -142,7 +164,8 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 │   │   ├── shell.json             # Status bar layout & widgets
 │   │   ├── themes/                # awsm-changi, luminous, sora-koi
 │   │   ├── hooks/theme-set        # Theme change automation
-│   │   └── extensions/omarchy-menu.jsonc
+│   │   ├── hooks/{pre-refresh-pacman,post-update,post-boot}.d/  # Driver pin + health check
+│   │   └── extensions/omarchy-menu.jsonc  # Routes Setup > Security > Fingerprint
 │   ├── wireplumber/               # Audio sink priority rules
 │   ├── starship.toml, btop/btop.conf, lazygit/config.yml
 │   ├── git/config                 # Aliases, rerere, histogram diff
@@ -158,12 +181,12 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 
 | Step | Action | Omarchy API Used |
 | :--- | :--- | :--- |
-| **1** | Install official packages (omarchy-zsh, zsh-autosuggestions, fprintd, usbutils) | `omarchy-pkg-add` |
-| **2** | Detect EgisTec MOC sensor; install SDCP driver (verified binary or pinned PKGBUILD build); archive offline package; lock in IgnorePkg; configure clamshell + persistent lock PAM | `omarchy-hw-fingerprint`, `fprintd-enroll` |
-| **3** | Prompt for optional AUR packages (hyprmoncfg, brave-origin) | `omarchy-pkg-aur-add`, `omarchy install browser` |
-| **4** | Back up existing configs to `~/.dotfiles-backup/`; deploy all dotfiles | File copy with backup |
+| **1** | Install official packages (omarchy-zsh, zsh-autosuggestions, usbutils, restic, rclone); Ghostty as default terminal | `omarchy-pkg-add`, `omarchy-install-terminal`, `omarchy-default-terminal` |
+| **2** | Back up existing configs to `~/.dotfiles-backup/`; deploy all dotfiles; link `egismoc-fingerprint` into `~/.local/bin` | File copy with backup |
+| **3** | EgisTec sensor → `egismoc-fingerprint setup` (see above); other sensor → Omarchy's wizard; failure doesn't stop the install | `omarchy-hw-fingerprint`, `omarchy-setup-security-fingerprint`, `omarchy-plugin-clone` |
+| **4** | Prompt for optional AUR packages (hyprmoncfg, brave-origin) | `omarchy-pkg-aur-add`, `omarchy-install-browser` |
 | **5** | Enable systemd `ssh-agent.socket`; write `environment.d` config; configure `~/.ssh/config` | `systemctl --user` |
-| **6** | Reload WirePlumber, Hyprland, Omarchy Shell; re-authenticate sudo through the edited PAM stack | `hyprctl reload`, `omarchy restart shell`, `sudo -k` |
+| **6** | Reload WirePlumber, Hyprland (report `configerrors`), terminals, Omarchy Shell | `hyprctl`, `omarchy-restart-terminal`, `omarchy-restart-shell` |
 
 ---
 
@@ -183,6 +206,7 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 | Concern | Protection |
 | :--- | :--- |
 | `omarchy update` replaces fingerprint driver | `IgnorePkg` in pacman.conf blocks both `libfprint` and `libfprint-egismoc-sdcp-git` |
+| Stock fingerprint wizard or a migration installs `libfprint-git` | The menu entry is overridden to `egismoc-fingerprint`; if the driver is replaced anyway, the `post-update`/`post-boot` hooks raise a clickable reinstall notification (`IgnorePkg` can't block an explicit `pacman -S`) |
 | `omarchy refresh pacman` wipes pacman.conf | Native `pre-refresh-pacman.d` hook automatically re-locks `IgnorePkg` before `pacman -Syyuu` runs |
 | `omarchy update` overwrites dotfiles | All configs live in `~/.config/` — Omarchy never touches user configs |
 | Driver source disappears or changes upstream | Build is pinned to one commit, and a checksum-verified binary is archived in `packages/`, `~/.local/share/packages/` and `/var/cache/pacman/pkg/` |

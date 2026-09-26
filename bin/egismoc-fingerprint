@@ -1,0 +1,528 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# egismoc-fingerprint — Omarchy fingerprint setup for EgisTec Match-on-Chip
+# sensors (1c7a:0582–05a5, e.g. the Acer Swift Go 14's 1c7a:0584).
+#
+# Omarchy's own `omarchy setup security fingerprint` installs libfprint-git,
+# which has no SDCP support for these sensors: enrollment looks fine, then the
+# print vanishes on the first verify. This command does the same job with the
+# SDCP driver instead, and hands off to Omarchy's setup for any other sensor.
+#
+# Usage:
+#   egismoc-fingerprint setup [-y]   Driver, enrollment, PAM, lock screen
+#   egismoc-fingerprint status       Read-only report of every piece
+#   egismoc-fingerprint check        Hook-safe (no sudo): notify if the driver
+#                                    was replaced; keep the lock clone patched
+#   egismoc-fingerprint detect       Print the sensor's product id, or exit 1
+# ==============================================================================
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+DOTFILES_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+ASSUME_YES=0
+# shellcheck source=lib/ui.sh
+source "$DOTFILES_DIR/lib/ui.sh"
+
+DRIVER_PKG="libfprint-egismoc-sdcp-git"
+DRIVER_PKGBUILD_DIR="$DOTFILES_DIR/packages/libfprint-egismoc-sdcp"
+DRIVER_CHECKSUMS="$DOTFILES_DIR/packages/.sha256sums"
+DRIVER_CACHE_DIRS=("$DOTFILES_DIR/packages" "$HOME/.local/share/packages" /var/cache/pacman/pkg)
+LOCK_DRIVER_HOOK="$DOTFILES_DIR/.config/omarchy/hooks/pre-refresh-pacman.d/lock-driver.hook"
+EGISMOC_PIDS=(0582 0583 0584 0586 0587 05a1 05a5)
+
+CURRENT_USER="${USER:-$(id -un)}"
+LOCK_CLONE_ID="$CURRENT_USER.lock"
+LOCK_CLONE_DIR="$HOME/.config/omarchy/plugins/$LOCK_CLONE_ID"
+# The sensor needs ~1.5s to reset its USB state machine after an idle timeout;
+# Omarchy's 250ms retry trips an assertion in the driver (task_ssm == NULL).
+LOCK_RETRY_MS=1500
+
+PAM_FILES=(sudo polkit-1 omarchy-lock-fingerprint)
+PAM_BACKUP_DIR="${EGISMOC_PAM_BACKUP_DIR:-$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)/pam}"
+PAM_EDIT_ACTIVE=0
+
+# ------------------------------------------------------------------------------
+# Hardware
+# ------------------------------------------------------------------------------
+
+# Prints the matching product id. Reads sysfs directly, like omarchy-hw-fingerprint,
+# so it works before usbutils is installed; OMARCHY_USB_DEVICES_PATH overrides it.
+egismoc_pid() {
+  local dev product
+  for dev in "${OMARCHY_USB_DEVICES_PATH:-/sys/bus/usb/devices}"/*; do
+    [[ -r $dev/idVendor && -r $dev/idProduct ]] || continue
+    [[ $(<"$dev/idVendor") == 1c7a ]] || continue
+    product=$(<"$dev/idProduct")
+    if [[ " ${EGISMOC_PIDS[*]} " == *" $product "* ]]; then
+      echo "$product"
+      return 0
+    fi
+  done
+  return 1
+}
+
+enrolled_print_count() {
+  local who="${1:-$CURRENT_USER}" listing
+  if [[ "$who" == "$CURRENT_USER" ]]; then
+    listing="$(fprintd-list "$who" 2>/dev/null || true)"
+  else
+    listing="$(sudo fprintd-list "$who" 2>/dev/null || true)"   # another user's prints need root
+  fi
+  grep -cE '^[[:space:]]*-[[:space:]]+#[0-9]+' <<<"$listing" || true
+}
+
+# ------------------------------------------------------------------------------
+# Driver: checksum-verified archived binary first, pinned PKGBUILD build second
+# ------------------------------------------------------------------------------
+
+# Prints the newest cached package whose sha256 matches packages/.sha256sums.
+find_verified_driver_pkg() {
+  [[ -f "$DRIVER_CHECKSUMS" ]] || return 0
+  local hash name dir
+  while read -r hash name; do
+    [[ -n "$name" ]] || continue
+    for dir in "${DRIVER_CACHE_DIRS[@]}"; do
+      if [[ -f "$dir/$name" ]] && [[ "$(sha256sum "$dir/$name" | awk '{print $1}')" == "$hash" ]]; then
+        echo "$dir/$name"
+        return 0
+      fi
+    done
+  done < <(tac "$DRIVER_CHECKSUMS")
+}
+
+warn_unverified_driver_pkgs() {
+  local pkg recorded
+  while IFS= read -r pkg; do
+    recorded="$(grep -F " $(basename "$pkg")" "$DRIVER_CHECKSUMS" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ -z "$recorded" ]]; then
+      warn "Ignoring unverified cached driver (not in packages/.sha256sums): $pkg"
+    elif [[ "$(sha256sum "$pkg" | awk '{print $1}')" != "$recorded" ]]; then
+      warn "Ignoring cached driver with a CHECKSUM MISMATCH (modified or corrupt): $pkg"
+    fi
+  done < <(find "${DRIVER_CACHE_DIRS[@]}" -maxdepth 1 -name "$DRIVER_PKG-*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null || true)
+}
+
+# Records a new binary's checksum and copies it to every offline location.
+# A different hash under an already-recorded filename is flagged, not trusted.
+archive_driver_pkg() {
+  local pkg="$1"
+  [[ -n "$pkg" && -f "$pkg" ]] || return 0
+  mkdir -p "$DOTFILES_DIR/packages" "$HOME/.local/share/packages"
+
+  local pkg_name pkg_hash recorded_hash=""
+  pkg_name="$(basename "$pkg")"
+  pkg_hash="$(sha256sum "$pkg" | awk '{print $1}')"
+  if [[ -f "$DRIVER_CHECKSUMS" ]]; then
+    recorded_hash="$(grep -F " $pkg_name" "$DRIVER_CHECKSUMS" 2>/dev/null | awk '{print $1}' || true)"
+  fi
+
+  if [[ -n "$recorded_hash" && "$recorded_hash" != "$pkg_hash" ]]; then
+    warn "Checksum mismatch for $pkg_name vs. the archived copy — NOT archiving it."
+    warn "Verify this binary by hand (recorded: ${recorded_hash:0:12}..., now: ${pkg_hash:0:12}...)."
+    return 0
+  fi
+  [[ -n "$recorded_hash" ]] || echo "$pkg_hash $pkg_name" >> "$DRIVER_CHECKSUMS"
+
+  local dir copied=0
+  for dir in "${DRIVER_CACHE_DIRS[@]}"; do
+    [[ -f "$dir/$pkg_name" ]] && continue
+    if [[ -w "$dir" ]]; then cp "$pkg" "$dir/" 2>/dev/null && copied=1
+    else sudo cp "$pkg" "$dir/" 2>/dev/null && copied=1; fi
+  done
+  if (( copied )) || [[ -z "$recorded_hash" ]]; then
+    info "Driver archived for offline reinstall (sha256 ${pkg_hash:0:12}...)."
+  fi
+  return 0
+}
+
+build_driver_from_pkgbuild() {
+  [[ -f "$DRIVER_PKGBUILD_DIR/PKGBUILD" ]] || fail "Missing $DRIVER_PKGBUILD_DIR/PKGBUILD — cannot build the driver."
+  command -v makepkg &>/dev/null || fail "makepkg not found — cannot build the driver."
+  curl -fsI --max-time 10 https://github.com >/dev/null 2>&1 ||
+    fail "GitHub is unreachable — cannot fetch the driver source. Check your network and re-run."
+
+  # Build outside the repo so makepkg's src/, pkg/ and git clone never land in it.
+  local work built
+  work="$(mktemp -d)"
+  mkdir -p "$work/out" "$work/src" "$work/build"
+  info "Building $DRIVER_PKG from the pinned PKGBUILD (a minute or two)..."
+  # --nocheck mirrors the build behind the archived binary; a manual makepkg
+  # in packages/libfprint-egismoc-sdcp/ runs the full test suite.
+  ( cd "$DRIVER_PKGBUILD_DIR" &&
+    PKGDEST="$work/out" SRCDEST="$work/src" BUILDDIR="$work/build" \
+      makepkg --syncdeps --rmdeps --cleanbuild --noconfirm --nocheck )
+
+  built="$(find "$work/out" -name "$DRIVER_PKG-*.pkg.tar.zst" ! -name "*debug*" | head -n 1 || true)"
+  [[ -n "$built" ]] || fail "makepkg finished but produced no $DRIVER_PKG package."
+  sudo pacman -U --noconfirm --ask=4 "$built"
+  archive_driver_pkg "$built"
+  rm -rf "$work"
+}
+
+install_driver() {
+  if pacman -Q "$DRIVER_PKG" &>/dev/null; then
+    info "SDCP driver already installed ($(pacman -Q "$DRIVER_PKG" | awk '{print $2}'))."
+    archive_driver_pkg "$(find_verified_driver_pkg)"
+  else
+    warn "Stock libfprint (and Omarchy's libfprint-git) lack SDCP for this sensor —"
+    warn "prints vanish after the first verify without the patched driver."
+    confirm "Install the SDCP driver ($DRIVER_PKG)? It replaces the current libfprint." true ||
+      fail "The SDCP driver is required for this sensor; stopping."
+
+    warn_unverified_driver_pkgs
+    local cached
+    cached="$(find_verified_driver_pkg)"
+    if [[ -n "$cached" ]]; then
+      info "Installing checksum-verified package: $cached"
+      # --ask=4 accepts pacman's "remove conflicting libfprint?" so the swap
+      # happens in a single transaction, as Omarchy's own setup does.
+      sudo pacman -U --noconfirm --ask=4 "$cached"
+      archive_driver_pkg "$cached"
+    else
+      info "No checksum-verified cached package found."
+      build_driver_from_pkgbuild
+    fi
+  fi
+
+  # Single source of truth for the IgnorePkg lock: the same hook Omarchy runs
+  # on `omarchy refresh pacman`.
+  bash "$LOCK_DRIVER_HOOK"
+}
+
+# ------------------------------------------------------------------------------
+# PAM — same lines as Omarchy's setup, plus quiet_log on the lid gate and no
+# fprintd timeout on the lock screen. Backed up first; rolled back on failure.
+# ------------------------------------------------------------------------------
+
+backup_pam_files() {
+  mkdir -p "$PAM_BACKUP_DIR"
+  local name
+  for name in "${PAM_FILES[@]}"; do
+    if [[ -f "/etc/pam.d/$name" ]]; then
+      cp "/etc/pam.d/$name" "$PAM_BACKUP_DIR/$name"
+    else
+      touch "$PAM_BACKUP_DIR/.$name-created"
+    fi
+  done
+}
+
+restore_pam_backup() {
+  local name
+  for name in "${PAM_FILES[@]}"; do
+    if [[ -f "$PAM_BACKUP_DIR/$name" ]]; then
+      sudo cp "$PAM_BACKUP_DIR/$name" "/etc/pam.d/$name"
+    elif [[ -f "$PAM_BACKUP_DIR/.$name-created" ]]; then
+      sudo rm -f "/etc/pam.d/$name"
+    fi
+  done
+  info "PAM files restored from $PAM_BACKUP_DIR."
+}
+
+pam_changed_this_run() {
+  local name
+  for name in "${PAM_FILES[@]}"; do
+    if [[ -f "$PAM_BACKUP_DIR/$name" ]]; then
+      cmp -s "$PAM_BACKUP_DIR/$name" "/etc/pam.d/$name" || return 0
+    elif [[ -f "$PAM_BACKUP_DIR/.$name-created" && -f "/etc/pam.d/$name" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+rollback_pam_if_mid_edit() {
+  if (( PAM_EDIT_ACTIVE )); then
+    PAM_EDIT_ACTIVE=0
+    warn "PAM edit was in progress — restoring pre-edit PAM files..."
+    restore_pam_backup
+  fi
+}
+
+on_error() {
+  local code=$?
+  trap - ERR
+  echo -e "\e[31mFailed at line $1 (exit $code).\e[0m" >&2
+  rollback_pam_if_mid_edit
+  exit "$code"
+}
+
+on_interrupt() {
+  trap - ERR INT TERM
+  echo -e "\e[31m\nInterrupted.\e[0m" >&2
+  rollback_pam_if_mid_edit
+  exit 130
+}
+
+# Inserts LINE directly before the first line of FILE matching the ERE REGEX.
+pam_insert_before() {
+  local file="$1" regex="$2" line="$3" tmp
+  if ! grep -qE "$regex" "$file"; then
+    warn "No line matching '$regex' in $file — not inserting: $line"
+    return 0
+  fi
+  tmp="$(mktemp)"
+  awk -v re="$regex" -v l="$line" '!done && $0 ~ re { print l; done = 1 } { print }' "$file" > "$tmp"
+  sudo cp "$tmp" "$file"   # overwrites in place: keeps root ownership and mode
+  rm -f "$tmp"
+}
+
+setup_pam() {
+  backup_pam_files
+  PAM_EDIT_ACTIVE=1
+
+  # Lid-closed gate, as Omarchy installs it; quiet_log also keeps the "lid is
+  # open" exit status out of the journal on every auth.
+  local gate="auth      [success=1 default=ignore] pam_exec.so quiet quiet_log /usr/bin/omarchy-hw-laptop-closed"
+  local pam_file
+  for pam_file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
+    if [[ -f "$pam_file" ]] && grep -q 'omarchy-hw-laptop-closed' "$pam_file" && ! grep -q 'quiet_log' "$pam_file"; then
+      sudo sed -i 's#pam_exec\.so quiet /usr/bin/omarchy-hw-laptop-closed#pam_exec.so quiet quiet_log /usr/bin/omarchy-hw-laptop-closed#' "$pam_file"
+    fi
+  done
+
+  # Once /etc/pam.d/polkit-1 exists Linux-PAM ignores the vendor copy, so
+  # start from that copy (or system-auth) rather than a pam_unix-only stack.
+  if [[ ! -f /etc/pam.d/polkit-1 ]]; then
+    if [[ -f /usr/lib/pam.d/polkit-1 ]]; then
+      sudo cp /usr/lib/pam.d/polkit-1 /etc/pam.d/polkit-1
+    else
+      sudo tee /etc/pam.d/polkit-1 >/dev/null <<'EOF'
+#%PAM-1.0
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    include      system-auth
+EOF
+    fi
+  fi
+
+  for pam_file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
+    [[ -f "$pam_file" ]] || continue
+    if ! grep -q 'pam_fprintd.so' "$pam_file"; then
+      info "Enabling fingerprint for $(basename "$pam_file")..."
+      pam_insert_before "$pam_file" '^[[:space:]]*-?auth[[:space:]]' "auth      sufficient pam_fprintd.so"
+    fi
+    # The gate must sit directly above pam_fprintd: success=1 skips one line.
+    if [[ -x /usr/bin/omarchy-hw-laptop-closed ]] && ! grep -q 'omarchy-hw-laptop-closed' "$pam_file"; then
+      pam_insert_before "$pam_file" 'pam_fprintd[.]so' "$gate"
+    fi
+  done
+
+  # Edits only ever insert lines, and sudo/polkit must keep a password path.
+  local name
+  for name in sudo polkit-1; do
+    [[ -f "/etc/pam.d/$name" ]] || continue
+    if [[ -f "$PAM_BACKUP_DIR/$name" ]] &&
+       (( $(wc -l < "/etc/pam.d/$name") < $(wc -l < "$PAM_BACKUP_DIR/$name") )); then
+      rollback_pam_if_mid_edit
+      fail "/etc/pam.d/$name shrank during the edit — restored it; no PAM changes kept."
+    fi
+    if ! grep -qE 'system-auth|pam_unix[.]so' "/etc/pam.d/$name"; then
+      rollback_pam_if_mid_edit
+      fail "/etc/pam.d/$name lost its password fallback — restored it; no PAM changes kept."
+    fi
+  done
+
+  # Lock screen: without timeout=-1 fprintd gives up after 30s and the lock
+  # re-arms into a driver assertion loop on this sensor.
+  if ! grep -q "timeout=-1" /etc/pam.d/omarchy-lock-fingerprint 2>/dev/null; then
+    info "Enabling fingerprint for the lock screen..."
+    sudo tee /etc/pam.d/omarchy-lock-fingerprint >/dev/null <<'EOF'
+#%PAM-1.0
+auth       required                    pam_fprintd.so timeout=-1 max-tries=-1
+account    include                     system-local-login
+EOF
+  fi
+
+  PAM_EDIT_ACTIVE=0
+}
+
+# `sudo -k CMD` re-authenticates through the new stack for one command without
+# clearing the cached timestamp, so a broken stack can still be rolled back.
+verify_sudo_pam() {
+  if ! pam_changed_this_run; then
+    rm -rf "$PAM_BACKUP_DIR"
+    rmdir "$(dirname "$PAM_BACKUP_DIR")" 2>/dev/null || true
+    return 0
+  fi
+  if (( ASSUME_YES )) || [[ ! -t 0 ]]; then
+    warn "PAM changed. Before closing this terminal, check in a NEW one: sudo -k true"
+    warn "Pre-edit PAM backups: $PAM_BACKUP_DIR"
+    return 0
+  fi
+  info "Checking sudo through the new PAM stack — touch the sensor or type your password..."
+  if sudo -k true; then
+    info "sudo works with fingerprint authentication enabled."
+    return 0
+  elif confirm "sudo re-authentication failed. Restore the pre-edit PAM files?" true; then
+    restore_pam_backup
+    warn "Fingerprint authentication was rolled back; the sensor itself is still enrolled."
+  else
+    warn "Left in place. Do NOT close this terminal until sudo works; backups: $PAM_BACKUP_DIR"
+  fi
+  return 1
+}
+
+# ------------------------------------------------------------------------------
+# Lock screen — a native `omarchy plugin clone` of omarchy.lock with the
+# longer retry interval. Needs no sudo, so `check` reuses it from hooks.
+# ------------------------------------------------------------------------------
+
+lock_retry_patched() {
+  grep -q "interval: $LOCK_RETRY_MS" <<<"$(sed -n '/id: fingerprintRetryTimer/,/repeat:/p' "$1" 2>/dev/null)"
+}
+
+setup_lock_plugin() {
+  if [[ ! -d "$LOCK_CLONE_DIR" ]]; then
+    if ! omarchy_shell_up; then
+      warn "Omarchy shell isn't running — skipping the lock-screen clone. Re-run from the desktop."
+      return 0
+    fi
+    omarchy-plugin-clone omarchy.lock >/dev/null
+    info "Cloned the lock screen to $LOCK_CLONE_ID (omarchy plugin clone)."
+  elif omarchy_shell_up; then
+    # Deploying a tracked shell.json can drop the clone from plugins[].
+    omarchy-plugin-enable "$LOCK_CLONE_ID" >/dev/null 2>&1 || warn "Could not enable $LOCK_CLONE_ID."
+  fi
+
+  local service="$LOCK_CLONE_DIR/Service.qml"
+  if [[ ! -f "$service" ]]; then
+    warn "$service not found — lock-screen retry delay not applied."
+  elif ! lock_retry_patched "$service"; then
+    sed -i "/id: fingerprintRetryTimer/,/repeat:/ s/interval: [0-9]\+/interval: $LOCK_RETRY_MS/" "$service"
+    info "Lock-screen fingerprint retry set to ${LOCK_RETRY_MS}ms (plugin hot-reloads)."
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------------------------
+
+cmd_setup() {
+  local pid
+  if ! pid="$(egismoc_pid)"; then
+    if omarchy-hw-fingerprint; then
+      info "This sensor isn't an EgisTec Match-on-Chip — handing off to Omarchy's own setup."
+      exec omarchy-setup-security-fingerprint
+    fi
+    fail "No fingerprint sensor detected."
+  fi
+  log "EgisTec Match-on-Chip sensor 1c7a:$pid — SDCP fingerprint setup"
+
+  trap 'on_error $LINENO' ERR
+  trap on_interrupt INT TERM
+  trap stop_sudo_keepalive EXIT
+  start_sudo_keepalive
+
+  install_driver
+  omarchy-pkg-add fprintd
+  sudo systemctl restart fprintd 2>/dev/null || true
+
+  # Match-on-Chip keeps templates on the sensor; prints enrolled as root (e.g.
+  # from an earlier sudo run) make the user's enrollment fail as a duplicate.
+  if (( $(enrolled_print_count root) > 0 )); then
+    warn "The sensor holds fingerprint(s) enrolled for root, which block enrolling '$CURRENT_USER'."
+    if confirm "Delete root's enrolled fingerprint(s)?" true; then
+      sudo fprintd-delete root || true
+    fi
+  fi
+
+  # Like Omarchy's setup, PAM is only wired once a print is enrolled AND
+  # verified, so auth never points at a sensor that can't match.
+  if (( $(enrolled_print_count) == 0 )); then
+    if (( ASSUME_YES )) || [[ ! -t 0 ]]; then
+      warn "No fingerprint enrolled, and enrolling needs you at the sensor."
+      warn "Driver is ready; run 'egismoc-fingerprint setup' in a terminal to enroll and finish."
+      return 0
+    fi
+    log "Enroll your right index finger — lift and place it until it completes."
+    fprintd-enroll "$CURRENT_USER" || fail "Enrollment failed; PAM left untouched."
+    log "Now verify it — this is the step that fails without SDCP."
+    fprintd-verify "$CURRENT_USER" || fail "Verification failed; PAM left untouched. Try 'egismoc-fingerprint setup' again."
+  else
+    info "Fingerprint already enrolled for $CURRENT_USER."
+  fi
+
+  setup_pam
+  setup_lock_plugin
+  verify_sudo_pam || exit 1
+  log "Fingerprint ready for sudo, polkit prompts, and the lock screen (Super + Ctrl + L)."
+}
+
+cmd_status() {
+  local pid ok="\e[32mok\e[0m" bad="\e[31m!!\e[0m" line
+  row() { printf "  [%b] %-14s %s\n" "$1" "$2" "$3"; }
+
+  echo "EgisTec fingerprint status"
+  if pid="$(egismoc_pid)"; then row "$ok" sensor "EgisTec Match-on-Chip 1c7a:$pid"
+  else row "$bad" sensor "no EgisTec Match-on-Chip sensor (this command only manages those)"; fi
+
+  if line="$(pacman -Q "$DRIVER_PKG" 2>/dev/null)"; then row "$ok" driver "$line"
+  else
+    line="$(pacman -Q libfprint libfprint-git 2>/dev/null | head -n 1 || true)"
+    row "$bad" driver "${line:-no libfprint} — no SDCP"
+  fi
+
+  if grep -qE "^[[:space:]]*IgnorePkg.*$DRIVER_PKG" /etc/pacman.conf 2>/dev/null; then row "$ok" pinned "IgnorePkg in /etc/pacman.conf"
+  else row "$bad" pinned "not in IgnorePkg — omarchy refresh pacman could replace it"; fi
+
+  local prints
+  prints="$(enrolled_print_count)"
+  if (( prints > 0 )); then row "$ok" enrolled "$prints print(s) for $CURRENT_USER"
+  else row "$bad" enrolled "no prints for $CURRENT_USER"; fi
+
+  local name
+  for name in sudo polkit-1; do
+    if grep -q 'pam_fprintd.so' "/etc/pam.d/$name" 2>/dev/null; then row "$ok" "pam $name" "fingerprint enabled"
+    else row "$bad" "pam $name" "fingerprint not enabled"; fi
+  done
+  if grep -q 'timeout=-1' /etc/pam.d/omarchy-lock-fingerprint 2>/dev/null; then row "$ok" "pam lock" "no fprintd timeout"
+  else row "$bad" "pam lock" "missing or still times out"; fi
+
+  if lock_retry_patched "$LOCK_CLONE_DIR/Service.qml"; then row "$ok" "lock plugin" "$LOCK_CLONE_ID, ${LOCK_RETRY_MS}ms retry"
+  else row "$bad" "lock plugin" "$LOCK_CLONE_ID clone missing or unpatched"; fi
+}
+
+# For post-update / post-boot hooks: never prompts, never uses sudo.
+cmd_check() {
+  egismoc_pid >/dev/null || return 0
+
+  if ! pacman -Q "$DRIVER_PKG" &>/dev/null; then
+    omarchy-notification-send -u critical -g 󰈷 \
+      "Fingerprint driver replaced" \
+      "The EgisTec SDCP driver is gone, so fingerprint auth will fail. Click to reinstall it." \
+      --exec omarchy-launch-floating-terminal-with-presentation "$SCRIPT_PATH" setup || true
+  fi
+
+  local service="$LOCK_CLONE_DIR/Service.qml"
+  if [[ -f "$service" ]] && ! lock_retry_patched "$service"; then
+    sed -i "/id: fingerprintRetryTimer/,/repeat:/ s/interval: [0-9]\+/interval: $LOCK_RETRY_MS/" "$service"
+  fi
+}
+
+usage() {
+  sed -n '11,16p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'
+}
+
+main() {
+  local cmd="${1:-}"
+  (( $# )) && shift
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -y|--yes) ASSUME_YES=1 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+  done
+
+  case "$cmd" in
+    setup)          cmd_setup ;;
+    status)         cmd_status ;;
+    check)          cmd_check ;;
+    detect)         egismoc_pid ;;
+    -h|--help|help) usage ;;
+    *)              usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"

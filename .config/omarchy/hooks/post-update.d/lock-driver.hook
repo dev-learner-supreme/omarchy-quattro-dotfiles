@@ -1,41 +1,31 @@
 #!/bin/bash
-# Omarchy hook: post-update
-# Called during `omarchy update` after system package upgrades and migrations.
-# Verifies that /etc/pacman.conf maintains IgnorePkg for libfprint,
-# PAM configurations retain required resilience flags, and lock screen retry
-# interval prevents driver assertion crashes.
+# Omarchy hook: post-update — runs at the end of `omarchy update`, after
+# migrations. Omarchy has revoked its sudo timestamp by now, so any repair
+# below asks for authorization; each one only runs when something drifted.
+# No-op on machines without the EgisTec SDCP driver.
 
-CONF="/etc/pacman.conf"
-if [[ -f "$CONF" ]]; then
-  if ! grep -q "libfprint-egismoc-sdcp-git" "$CONF"; then
-    if grep -q "^[[:space:]]*IgnorePkg" "$CONF"; then
-      sudo sed -i '/^[[:space:]]*IgnorePkg/s/$/ libfprint libfprint-egismoc-sdcp-git/' "$CONF"
-    elif grep -q "^[[:space:]]*HoldPkg" "$CONF"; then
-      sudo sed -i '/^[[:space:]]*HoldPkg/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' "$CONF"
-    elif grep -q "^\[options\]" "$CONF"; then
-      sudo sed -i '/^\[options\]/a IgnorePkg = libfprint libfprint-egismoc-sdcp-git' "$CONF"
-    fi
-  fi
-fi
+pacman -Q libfprint-egismoc-sdcp-git &>/dev/null || {
+  # Driver missing on EgisTec hardware (e.g. replaced by libfprint-git): the
+  # check sends a clickable "reinstall" notification. Silent elsewhere.
+  [[ -x $HOME/.local/bin/egismoc-fingerprint ]] && "$HOME/.local/bin/egismoc-fingerprint" check
+  exit 0
+}
 
-# Ensure lock screen PAM maintains timeout=-1 to prevent crash loop
+# IgnorePkg: same logic Omarchy runs before `omarchy refresh pacman`.
+bash "$(dirname "$0")/../pre-refresh-pacman.d/lock-driver.hook"
+
+# Lock screen PAM: keep fprintd from timing out into a driver crash loop.
 if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && ! grep -q "timeout=-1" /etc/pam.d/omarchy-lock-fingerprint; then
   sudo sed -i 's/pam_fprintd\.so.*/pam_fprintd.so timeout=-1 max-tries=-1/' /etc/pam.d/omarchy-lock-fingerprint
 fi
 
-# Ensure PAM clamshell gate maintains quiet_log to silence journalctl -p 3 log spam
+# Lid-closed gate: a migration may re-add it without quiet_log.
 for pam_file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
-  if [[ -f "$pam_file" ]] && grep -q 'omarchy-hw-laptop-closed' "$pam_file" 2>/dev/null; then
-    if ! grep -q 'quiet_log' "$pam_file" 2>/dev/null; then
-      sudo sed -i 's/pam_exec\.so quiet \/usr\/bin\/omarchy-hw-laptop-closed/pam_exec.so quiet quiet_log \/usr\/bin\/omarchy-hw-laptop-closed/' "$pam_file"
-    fi
+  if [[ -f $pam_file ]] && grep -q 'omarchy-hw-laptop-closed' "$pam_file" && ! grep -q 'quiet_log' "$pam_file"; then
+    sudo sed -i 's#pam_exec\.so quiet /usr/bin/omarchy-hw-laptop-closed#pam_exec.so quiet quiet_log /usr/bin/omarchy-hw-laptop-closed#' "$pam_file"
   fi
 done
 
-# Ensure EgisTec MOC lockscreen retry delay is maintained at 1500ms
-for service_qml in "$HOME"/.config/omarchy/plugins/*.lock/Service.qml; do
-  if [[ -f "$service_qml" ]] && grep -q "interval: 250" "$service_qml" 2>/dev/null; then
-    sed -i '/id: fingerprintRetryTimer/,/repeat:/ s/interval: [0-9]\+/interval: 1500/' "$service_qml"
-  fi
-done
-
+# Lock-screen retry delay on the cloned lock plugin (no sudo needed).
+[[ -x $HOME/.local/bin/egismoc-fingerprint ]] && "$HOME/.local/bin/egismoc-fingerprint" check
+exit 0

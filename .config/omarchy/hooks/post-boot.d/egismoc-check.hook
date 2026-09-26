@@ -1,0 +1,7 @@
+#!/bin/bash
+# Omarchy hook: post-boot — no sudo, no prompts. On EgisTec hardware, raises a
+# clickable notification if the SDCP fingerprint driver has been replaced, and
+# keeps the cloned lock screen's retry delay patched. Silent everywhere else.
+
+[[ -x $HOME/.local/bin/egismoc-fingerprint ]] && "$HOME/.local/bin/egismoc-fingerprint" check
+exit 0

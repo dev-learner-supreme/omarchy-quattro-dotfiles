@@ -26,5 +26,11 @@
   //
   // Example: replace the default About action by reusing the same id. Existing
   // fields are kept unless overridden.
+  //
+  // Setup > Security > Fingerprint: the stock wizard installs libfprint-git,
+  // which has no SDCP support for EgisTec Match-on-Chip sensors. Route it
+  // through egismoc-fingerprint, which hands off to the stock wizard on any
+  // other sensor. Icon, label and `when` are kept from the default row.
+  "setup.security.fingerprint": {"description":"SDCP-aware for EgisTec sensors","action":"omarchy-launch-floating-terminal-with-presentation egismoc-fingerprint setup"},
   // "about": {"icon":"","label":"About","action":"omarchy-launch-or-focus-tui \"zsh -c 'fastfetch; read -k 1'\""},
 }

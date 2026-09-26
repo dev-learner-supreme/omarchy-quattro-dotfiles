@@ -3,11 +3,15 @@
 # Called by `omarchy refresh pacman` after the template is copied to /etc/pacman.conf
 # and BEFORE `pacman -Syyuu` runs.
 # Preserves custom IgnorePkg lock for the EgisTec Match-on-Chip SDCP driver.
+# Also used by bin/egismoc-fingerprint and the post-update hook, so this is the
+# only copy of the IgnorePkg logic.
 
 CONF="/etc/pacman.conf"
 [[ -f "$CONF" ]] || exit 0
+# Only pin on machines that actually run the SDCP driver.
+pacman -Q libfprint-egismoc-sdcp-git &>/dev/null || exit 0
 
-if ! grep -q "libfprint-egismoc-sdcp-git" "$CONF"; then
+if ! grep -qE "^[[:space:]]*IgnorePkg.*libfprint-egismoc-sdcp-git" "$CONF"; then
   if grep -q "^[[:space:]]*IgnorePkg" "$CONF"; then
     sudo sed -i '/^[[:space:]]*IgnorePkg/s/$/ libfprint libfprint-egismoc-sdcp-git/' "$CONF"
   elif grep -q "^[[:space:]]*HoldPkg" "$CONF"; then

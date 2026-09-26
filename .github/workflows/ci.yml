@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: |
+          for f in install.sh bin/egismoc-fingerprint lib/*.sh tests/*.sh tests/lib/*.sh \
+                   .config/omarchy/hooks/theme-set .config/omarchy/hooks/*/*.hook \
+                   packages/libfprint-egismoc-sdcp/PKGBUILD; do
+            bash -n "$f"
+          done
+
+      - name: ShellCheck
+        run: |
+          command -v shellcheck >/dev/null || sudo apt-get install -y shellcheck
+          shellcheck -x install.sh bin/egismoc-fingerprint lib/*.sh tests/*.sh tests/lib/*.sh \
+            .config/omarchy/hooks/theme-set .config/omarchy/hooks/*/*.hook
+
+      - name: Archived driver matches its checksum
+        run: cd packages && sha256sum -c .sha256sums
+
+      - name: Config files parse
+        run: |
+          python3 -m json.tool .config/omarchy/shell.json > /dev/null
+          python3 - <<'EOF'
+          import json, re
+          text = open(".config/omarchy/extensions/omarchy-menu.jsonc").read()
+          text = re.sub(r"^\s*//.*$", "", text, flags=re.M)
+          json.loads(re.sub(r",(\s*})", r"\1", text))
+          EOF
+
+      - name: Tests
+        run: tests/run.sh

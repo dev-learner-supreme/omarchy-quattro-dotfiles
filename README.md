@@ -102,7 +102,7 @@ It's wired into Omarchy in three places:
 
 - **Menu** — `omarchy-menu.jsonc` overrides `setup.security.fingerprint`, so *Setup > Security > Fingerprint* runs this instead of the stock wizard.
 - **Hooks** — `pre-refresh-pacman` keeps the driver in `IgnorePkg`; `post-update` repairs PAM drift; `post-update` and `post-boot` send a clickable *"Fingerprint driver replaced"* notification if anything swaps the driver out. All are no-ops on machines without the SDCP driver.
-- **Lock screen** — a native `omarchy plugin clone omarchy.lock` with the retry delay raised to 1500ms (the sensor needs it to reset).
+- **Lock screen** — a native `omarchy plugin clone omarchy.lock` with the retry delay raised to 1500ms (the sensor needs it to reset). A clone doesn't get Omarchy's lock-screen updates on its own, so after every update and at boot it's compared with Omarchy's current lock screen and rebuilt if Omarchy changed it (you get a notification). It's never swapped while the screen is locked, and if a rebuild fails you fall back to Omarchy's stock lock screen, not a broken one.
 
 Like Omarchy's own setup, PAM is only edited after a print is enrolled *and* verified.
 

@@ -12,7 +12,7 @@
 #   egismoc-fingerprint setup [-y]   Driver, enrollment, PAM, lock screen
 #   egismoc-fingerprint status       Read-only report of every piece
 #   egismoc-fingerprint check        Hook-safe (no sudo): notify if the driver
-#                                    was replaced; keep the lock clone patched
+#                                    was replaced; rebuild a stale lock screen
 #   egismoc-fingerprint detect       Print the sensor's product id, or exit 1
 # ==============================================================================
 set -Eeuo pipefail
@@ -33,11 +33,13 @@ EGISMOC_PIDS=(0582 0583 0584 0586 0587 05a1 05a5)
 CURRENT_USER="${USER:-$(id -un)}"
 LOCK_CLONE_ID="$CURRENT_USER.lock"
 LOCK_CLONE_DIR="$HOME/.config/omarchy/plugins/$LOCK_CLONE_ID"
+STOCK_LOCK_DIR="${OMARCHY_PATH:-/usr/share/omarchy}/shell/plugins/lock"
 # The sensor needs ~1.5s to reset its USB state machine after an idle timeout;
 # Omarchy's 250ms retry trips an assertion in the driver (task_ssm == NULL).
 LOCK_RETRY_MS=1500
 
 PAM_FILES=(sudo polkit-1 omarchy-lock-fingerprint)
+FP_LINES_RE='pam_fprintd[.]so|omarchy-hw-laptop-closed'
 PAM_BACKUP_DIR="${EGISMOC_PAM_BACKUP_DIR:-$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)/pam}"
 PAM_EDIT_ACTIVE=0
 
@@ -190,8 +192,9 @@ install_driver() {
 }
 
 # ------------------------------------------------------------------------------
-# PAM — same lines as Omarchy's setup, plus quiet_log on the lid gate and no
-# fprintd timeout on the lock screen. Backed up first; rolled back on failure.
+# PAM — Omarchy's fingerprint lines for sudo and polkit (plus quiet_log on the
+# lid gate), and no fprintd timeout on the lock screen. Backed up first;
+# rolled back on failure.
 # ------------------------------------------------------------------------------
 
 backup_pam_files() {
@@ -296,6 +299,8 @@ EOF
     fi
   fi
 
+  # Fingerprint first, password as the fallback: `sufficient` never removes the
+  # password path, it only lets a matching finger skip it.
   for pam_file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
     [[ -f "$pam_file" ]] || continue
     if ! grep -q 'pam_fprintd.so' "$pam_file"; then
@@ -308,14 +313,16 @@ EOF
     fi
   done
 
-  # Edits only ever insert lines, and sudo/polkit must keep a password path.
+  # Apart from fingerprint lines, each file must be exactly what it was, and
+  # each must keep a password path. Anything else means the edit went wrong.
   local name
   for name in sudo polkit-1; do
     [[ -f "/etc/pam.d/$name" ]] || continue
     if [[ -f "$PAM_BACKUP_DIR/$name" ]] &&
-       (( $(wc -l < "/etc/pam.d/$name") < $(wc -l < "$PAM_BACKUP_DIR/$name") )); then
+       ! cmp -s <(grep -vE "$FP_LINES_RE" "$PAM_BACKUP_DIR/$name" || true) \
+                <(grep -vE "$FP_LINES_RE" "/etc/pam.d/$name" || true); then
       rollback_pam_if_mid_edit
-      fail "/etc/pam.d/$name shrank during the edit — restored it; no PAM changes kept."
+      fail "/etc/pam.d/$name changed beyond its fingerprint lines — restored it; no PAM changes kept."
     fi
     if ! grep -qE 'system-auth|pam_unix[.]so' "/etc/pam.d/$name"; then
       rollback_pam_if_mid_edit
@@ -352,7 +359,7 @@ verify_sudo_pam() {
   fi
   info "Checking sudo through the new PAM stack — touch the sensor or type your password..."
   if sudo -k true; then
-    info "sudo works with fingerprint authentication enabled."
+    info "sudo works with fingerprint (password still works as the fallback)."
     return 0
   elif confirm "sudo re-authentication failed. Restore the pre-edit PAM files?" true; then
     restore_pam_backup
@@ -365,32 +372,95 @@ verify_sudo_pam() {
 
 # ------------------------------------------------------------------------------
 # Lock screen — a native `omarchy plugin clone` of omarchy.lock with the
-# longer retry interval. Needs no sudo, so `check` reuses it from hooks.
+# longer retry interval. A clone doesn't receive Omarchy's lock-screen updates,
+# so it is compared with the stock plugin and rebuilt whenever Omarchy changes
+# it. Needs no sudo, so `check` runs all of this from hooks.
 # ------------------------------------------------------------------------------
 
 lock_retry_patched() {
   grep -q "interval: $LOCK_RETRY_MS" <<<"$(sed -n '/id: fingerprintRetryTimer/,/repeat:/p' "$1" 2>/dev/null)"
 }
 
+# Returns 0 if the retry delay is in place (patching it if needed).
+patch_lock_retry() {
+  local service="$LOCK_CLONE_DIR/Service.qml"
+  [[ -f "$service" ]] || return 1
+  lock_retry_patched "$service" && return 0
+  sed -i "/id: fingerprintRetryTimer/,/repeat:/ s/interval: [0-9]\+/interval: $LOCK_RETRY_MS/" "$service"
+  lock_retry_patched "$service"
+}
+
+normalized_lock_file() {
+  sed "/id: fingerprintRetryTimer/,/repeat:/ s/interval: [0-9]\+/interval: RETRY/" "$1"
+}
+
+# `omarchy plugin clone` copies the stock plugin verbatim and rewrites only
+# manifest.json, and the retry delay is our one change. Any other difference
+# means Omarchy has shipped a new lock screen since the clone was made.
+lock_clone_outdated() {
+  [[ -d "$STOCK_LOCK_DIR" && -d "$LOCK_CLONE_DIR" ]] || return 1
+  local f rel
+  while IFS= read -r -d '' f; do
+    rel="${f#"$STOCK_LOCK_DIR"/}"
+    [[ "$rel" == manifest.json ]] && continue
+    [[ -f "$LOCK_CLONE_DIR/$rel" ]] || return 0
+    cmp -s <(normalized_lock_file "$f") <(normalized_lock_file "$LOCK_CLONE_DIR/$rel") || return 0
+  done < <(find -L "$STOCK_LOCK_DIR" -type f -print0 2>/dev/null || true)
+  while IFS= read -r -d '' f; do
+    rel="${f#"$LOCK_CLONE_DIR"/}"
+    [[ "$rel" == manifest.json || -f "$STOCK_LOCK_DIR/$rel" ]] || return 0
+  done < <(find "$LOCK_CLONE_DIR" -type f -print0 2>/dev/null || true)
+  return 1
+}
+
+# Rebuilds the clone from Omarchy's current lock screen. Removing the old
+# clone first means a failed re-clone leaves Omarchy's stock lock screen
+# running, never a half-built one.
+#   0 rebuilt and patched   1 skipped (shell down or session locked)
+#   2 re-clone failed       3 rebuilt, but the retry delay couldn't be applied
+refresh_lock_clone() {
+  if ! omarchy_shell_up || omarchy-hyprland-session-locked 2>/dev/null; then
+    return 1
+  fi
+  if [[ -d "$LOCK_CLONE_DIR" ]]; then
+    omarchy-plugin-remove "$LOCK_CLONE_ID" --yes >/dev/null 2>&1 || return 1
+  fi
+  omarchy-plugin-clone omarchy.lock >/dev/null 2>&1 || return 2
+  patch_lock_retry || return 3
+}
+
 setup_lock_plugin() {
+  if [[ -d "$LOCK_CLONE_DIR" ]] && lock_clone_outdated; then
+    info "Omarchy has updated its lock screen since your copy was made — rebuilding the copy..."
+    local rc=0
+    refresh_lock_clone || rc=$?
+    case $rc in
+      0) info "Lock screen rebuilt from Omarchy's latest version." ;;
+      1) warn "Couldn't rebuild it right now; it's retried after updates and at boot." ;;
+      2) warn "Rebuild failed — Omarchy's stock lock screen is active. Re-run: egismoc-fingerprint setup" ;;
+      3) warn "Rebuilt, but Omarchy changed the lock-screen code, so the ${LOCK_RETRY_MS}ms delay couldn't be applied." ;;
+    esac
+    return 0
+  fi
+
   if [[ ! -d "$LOCK_CLONE_DIR" ]]; then
     if ! omarchy_shell_up; then
-      warn "Omarchy shell isn't running — skipping the lock-screen clone. Re-run from the desktop."
+      warn "Omarchy shell isn't running — skipping the lock-screen copy. Re-run from the desktop."
       return 0
     fi
-    omarchy-plugin-clone omarchy.lock >/dev/null
+    omarchy-plugin-clone omarchy.lock >/dev/null || { warn "Could not clone the lock screen."; return 0; }
     info "Cloned the lock screen to $LOCK_CLONE_ID (omarchy plugin clone)."
   elif omarchy_shell_up; then
     # Deploying a tracked shell.json can drop the clone from plugins[].
     omarchy-plugin-enable "$LOCK_CLONE_ID" >/dev/null 2>&1 || warn "Could not enable $LOCK_CLONE_ID."
   fi
 
-  local service="$LOCK_CLONE_DIR/Service.qml"
-  if [[ ! -f "$service" ]]; then
-    warn "$service not found — lock-screen retry delay not applied."
-  elif ! lock_retry_patched "$service"; then
-    sed -i "/id: fingerprintRetryTimer/,/repeat:/ s/interval: [0-9]\+/interval: $LOCK_RETRY_MS/" "$service"
+  if lock_retry_patched "$LOCK_CLONE_DIR/Service.qml"; then
+    :
+  elif patch_lock_retry; then
     info "Lock-screen fingerprint retry set to ${LOCK_RETRY_MS}ms (plugin hot-reloads)."
+  else
+    warn "Couldn't apply the ${LOCK_RETRY_MS}ms lock-screen retry delay (Omarchy may have changed that code)."
   fi
 }
 
@@ -444,9 +514,9 @@ cmd_setup() {
   fi
 
   setup_pam
-  setup_lock_plugin
   verify_sudo_pam || exit 1
-  log "Fingerprint ready for sudo, polkit prompts, and the lock screen (Super + Ctrl + L)."
+  setup_lock_plugin
+  log "Fingerprint ready for sudo, admin prompts, and the lock screen (Super + Ctrl + L). Your password still works everywhere."
 }
 
 cmd_status() {
@@ -473,14 +543,16 @@ cmd_status() {
 
   local name
   for name in sudo polkit-1; do
-    if grep -q 'pam_fprintd.so' "/etc/pam.d/$name" 2>/dev/null; then row "$ok" "pam $name" "fingerprint enabled"
+    if grep -q 'pam_fprintd.so' "/etc/pam.d/$name" 2>/dev/null; then row "$ok" "pam $name" "fingerprint or password"
     else row "$bad" "pam $name" "fingerprint not enabled"; fi
   done
   if grep -q 'timeout=-1' /etc/pam.d/omarchy-lock-fingerprint 2>/dev/null; then row "$ok" "pam lock" "no fprintd timeout"
   else row "$bad" "pam lock" "missing or still times out"; fi
 
-  if lock_retry_patched "$LOCK_CLONE_DIR/Service.qml"; then row "$ok" "lock plugin" "$LOCK_CLONE_ID, ${LOCK_RETRY_MS}ms retry"
-  else row "$bad" "lock plugin" "$LOCK_CLONE_ID clone missing or unpatched"; fi
+  if [[ ! -d "$LOCK_CLONE_DIR" ]]; then row "$bad" "lock plugin" "$LOCK_CLONE_ID copy missing"
+  elif lock_clone_outdated; then row "$bad" "lock plugin" "older than Omarchy's lock screen — rebuilt after updates/boot, or run setup"
+  elif ! lock_retry_patched "$LOCK_CLONE_DIR/Service.qml"; then row "$bad" "lock plugin" "${LOCK_RETRY_MS}ms retry not applied"
+  else row "$ok" "lock plugin" "$LOCK_CLONE_ID, ${LOCK_RETRY_MS}ms retry, matches Omarchy's current lock screen"; fi
 }
 
 # For post-update / post-boot hooks: never prompts, never uses sudo.
@@ -494,10 +566,26 @@ cmd_check() {
       --exec omarchy-launch-floating-terminal-with-presentation "$SCRIPT_PATH" setup || true
   fi
 
-  local service="$LOCK_CLONE_DIR/Service.qml"
-  if [[ -f "$service" ]] && ! lock_retry_patched "$service"; then
-    sed -i "/id: fingerprintRetryTimer/,/repeat:/ s/interval: [0-9]\+/interval: $LOCK_RETRY_MS/" "$service"
+  if [[ -d "$LOCK_CLONE_DIR" ]] && ! lock_clone_outdated; then
+    patch_lock_retry || true
+    return 0
   fi
+  # No copy at all: only rebuild it if fingerprint setup was completed (a
+  # previous rebuild failed, or the copy was removed).
+  [[ -d "$LOCK_CLONE_DIR" || -f /etc/pam.d/omarchy-lock-fingerprint ]] || return 0
+
+  local rc=0
+  refresh_lock_clone || rc=$?
+  case $rc in
+    0) omarchy-notification-send -g 󰌾 "Lock screen updated" \
+         "Rebuilt your lock screen from Omarchy's latest version; the fingerprint fix is still applied." || true ;;
+    1) ;;  # shell down or session locked: the next boot or update retries
+    2) omarchy-notification-send -u critical -g 󰌾 "Lock screen refresh failed" \
+         "Omarchy's stock lock screen is active, so fingerprint unlock may be unreliable. Click to redo the setup." \
+         --exec omarchy-launch-floating-terminal-with-presentation "$SCRIPT_PATH" setup || true ;;
+    3) omarchy-notification-send -u critical -g 󰌾 "Lock screen fingerprint fix not applied" \
+         "Omarchy changed its lock-screen code, so the ${LOCK_RETRY_MS}ms fingerprint delay no longer fits. Fingerprint unlock may be unreliable until this repo is updated." || true ;;
+  esac
 }
 
 usage() {

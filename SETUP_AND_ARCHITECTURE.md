@@ -97,7 +97,10 @@ overridden to run. On any other sensor it hands off to Omarchy's wizard.
    fingerprint retry raised from 250ms to 1500ms (the sensor needs it to reset).
 6. **Health check**: the `post-update` and `post-boot` hooks run
    `egismoc-fingerprint check`, which raises a clickable notification if the
-   driver has been replaced and re-applies the lock-screen patch if it drifted.
+   driver has been replaced, and keeps the lock-screen copy current: if an
+   Omarchy update changed the stock lock screen, the copy is removed, re-cloned
+   from it and re-patched (never while the session is locked). A failed rebuild
+   leaves Omarchy's stock lock screen active and is retried on the next check.
 
 Check every piece at once with `egismoc-fingerprint status`.
 

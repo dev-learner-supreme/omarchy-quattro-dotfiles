@@ -32,6 +32,10 @@ unless it is copied back into this repo.
   `required`, for sudo and polkit, and a password path must remain. After any
   PAM change, the user must confirm `sudo -k true` works in a *new* terminal
   before closing the old one.
+- **Don't hand-edit `~/.config/omarchy/plugins/<user>.lock/`.** It's rebuilt from
+  Omarchy's stock lock screen whenever that changes, and any file that differs
+  from stock (other than the retry delay) marks it stale. Change the lock
+  screen through `bin/egismoc-fingerprint` instead.
 - **Never modify `/usr/share/omarchy/`** — read it to learn how commands work.
 - Don't run `install.sh` or `egismoc-fingerprint setup` yourself: they need the
   user at a terminal (sudo, and a finger on the sensor). Ask the user to run them.

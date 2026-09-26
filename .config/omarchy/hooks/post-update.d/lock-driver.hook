@@ -26,6 +26,7 @@ for pam_file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
   fi
 done
 
-# Lock-screen retry delay on the cloned lock plugin (no sudo needed).
+# Lock screen (no sudo): if this update changed Omarchy's lock screen, rebuild
+# the cloned copy from it and re-apply the fingerprint retry delay.
 [[ -x $HOME/.local/bin/egismoc-fingerprint ]] && "$HOME/.local/bin/egismoc-fingerprint" check
 exit 0

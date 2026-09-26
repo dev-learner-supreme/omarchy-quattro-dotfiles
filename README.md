@@ -19,6 +19,8 @@ Personal Hyprland / Omarchy Quattro configuration and installer, structured for 
 - [Keybindings](#keybindings)
 - [Audio Priority Rules](#audio-priority-rules)
 - [Installation](#installation-on-another-omarchy-machine)
+- [How dotfiles are deployed](#how-dotfiles-are-deployed)
+- [Tests](#tests)
 - [Safety Guards](#safety-guards)
 - [Security & Update Safety](#security--omarchy-update-safety)
 - [Documentation](#documentation-guides)
@@ -30,10 +32,12 @@ Personal Hyprland / Omarchy Quattro configuration and installer, structured for 
 
 | Component | Path | Highlights |
 |---|---|---|
-| Hyprland | `.config/hypr/` | Custom keybindings (`bindings.lua`), window rules for Android Emulator / QEMU (floating, full opacity), input & look'n'feel overrides |
-| Omarchy Shell | `.config/omarchy/` *(optional)* | Bar/widget layout (`shell.json`), menu extensions (`omarchy-menu.jsonc`), theme-set automation hooks |
-| Audio (WirePlumber) | `.config/wireplumber/`, `.local/share/wireplumber/` | Sink priority rules, dynamic hardware jack autoswitcher (`sof-autoswitch.lua`), Bluetooth A2DP autoconnect |
-| Terminals & Shell Tools | various | Ghostty, Alacritty, Kitty, Foot configs; Starship, btop, lazygit, git config; `.bashrc` / `.zshrc` |
+| Hyprland | `.config/hypr/` | Custom keybindings (`bindings.lua`), window rules for Android Emulator / QEMU (`hyprland.lua`), keyboard/touchpad/gesture settings (`input.lua`) |
+| Omarchy Shell | `.config/omarchy/` | Bar/widget layout (`shell.json`), menu extensions (`omarchy-menu.jsonc`), hooks |
+| Audio (WirePlumber) | `.config/wireplumber/`, `.local/share/wireplumber/` | Sink priority rules, headphone/speaker autoswitcher (`sof-autoswitch.lua`) |
+| Shell & tools | various | Ghostty (zsh, font size), git identity and `gh` credentials, `.bashrc` / `.zshrc` |
+
+Only files that differ from Omarchy's own defaults are tracked. Everything else stays Omarchy's, so its updates keep reaching you. To start customizing another file, copy it from `~/.config` into the same path here.
 
 ## Keybindings
 
@@ -80,7 +84,7 @@ It is an orchestrator: wherever Omarchy has a native command for a step, it call
 |---|---|---|
 | Pre-flight | Confirms Omarchy, warns if pre-Quattro, one run at a time, keeps `sudo` alive | `omarchy version` |
 | 1 | Official packages; Ghostty installed and set as the default terminal | `omarchy pkg add`, `omarchy install terminal`, `omarchy default terminal` |
-| 2 | Backs up conflicting configs, deploys `.config` / `.local`, links `egismoc-fingerprint` into `~/.local/bin` | hooks in `~/.config/omarchy/hooks/*.d`, menu extension |
+| 2 | Deploys `.config` / `.local` (see [How dotfiles are deployed](#how-dotfiles-are-deployed)), links `egismoc-fingerprint` into `~/.local/bin` | hooks in `~/.config/omarchy/hooks/*.d`, menu extension |
 | 3 | Fingerprint: EgisTec sensor → `egismoc-fingerprint setup`; any other sensor → Omarchy's own wizard. A failure here doesn't stop the rest | `omarchy-hw-fingerprint`, `omarchy setup security fingerprint`, `omarchy plugin clone` |
 | 4 | Optional AUR packages (`hyprmoncfg`, Brave Origin) | `omarchy pkg aur add`, `omarchy install browser` |
 | 5 | SSH agent via systemd socket activation | — |
@@ -110,6 +114,33 @@ Like Omarchy's own setup, PAM is only edited after a print is enrolled *and* ver
 
 [`CLAUDE.md`](CLAUDE.md) (also `AGENTS.md`) gives coding agents the repo layout and the hard rules — above all, never run the stock fingerprint wizard or install `libfprint-git` on the laptop. On Omarchy it complements the built-in `omarchy` skill that Claude Code already loads for `~/.config` work.
 
+### How dotfiles are deployed
+
+Omarchy's own updates edit some of these files (for example `shell.json` and `hyprland.lua`), and so do apps like hyprmoncfg. So `install.sh` remembers what it last deployed (in `~/.local/state/omarchy-dotfiles/deployed`) and treats each file accordingly:
+
+| On this machine the file is… | What happens |
+|---|---|
+| missing | Added |
+| identical to the repo | Nothing |
+| exactly what `install.sh` put there last time | Updated to the repo's version |
+| Omarchy's untouched default (same as `/etc/skel`) | Replaced, with a backup |
+| **changed since the last deploy** | **You're asked:** keep yours, use the repo's (yours is backed up), copy yours into the repo, or show the difference. With `-y` it keeps yours and lists it at the end. |
+| deleted from the repo, unchanged here | Removed, with a backup |
+| deleted from the repo, but changed here | Kept (you're asked without `-y`), and no longer managed |
+
+Files that are symlinks are left alone.
+
+---
+
+## Tests
+
+```bash
+tests/run.sh            # everything, in throwaway sandboxes (~10s)
+tests/run.sh dotfiles   # just the tests whose name contains "dotfiles"
+```
+
+The tests run `install.sh` and `egismoc-fingerprint` against a fake home folder, fake `/etc`, a fake USB sensor, and stand-in Omarchy/pacman/sudo commands, so they never touch the real system. GitHub runs them on every push, along with ShellCheck, a checksum check of the archived driver, and a parse check of the JSON configs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
 ---
 
 ## Safety Guards
@@ -123,7 +154,8 @@ Anything touching authentication or system packages is treated as higher-risk th
 | Enroll before PAM | PAM is only touched once a print is enrolled and verified, so auth never points at a sensor that can't match |
 | PAM backup before edit | `/etc/pam.d/sudo`, `polkit-1` and `omarchy-lock-fingerprint` are copied to `~/.dotfiles-backup/<timestamp>/pam/` before any edit |
 | Scoped auto-restore | If the PAM edit fails or is interrupted (Ctrl-C), all three files are restored. A later, unrelated failure (e.g. Step 5) leaves a completed PAM setup alone |
-| PAM sanity checks | Edits only ever insert lines, and sudo/polkit must still reach `system-auth`/`pam_unix` (password fallback); either check failing triggers an immediate restore |
+| PAM sanity checks | Apart from fingerprint lines, sudo/polkit must match their backups exactly, and must still reach `system-auth`/`pam_unix` (password fallback); either check failing triggers an immediate restore |
+| No silent overwrites | A config file changed on this machine since the last deploy is never replaced without asking |
 | Checksum-verified driver install | A cached driver binary is installed only if its sha256 matches `packages/.sha256sums`; unlisted or tampered binaries are ignored with a warning |
 | Pinned source build | With no verified binary, the driver is built from the repo's own pinned [PKGBUILD](packages/libfprint-egismoc-sdcp/) — never from the AUR — after a network check |
 | Real PAM re-auth at the end | `sudo -k true` re-authenticates through the edited stack (fingerprint or password) without dropping the cached session; if it fails, you're offered a one-step restore |
@@ -145,7 +177,7 @@ Anything touching authentication or system packages is treated as higher-risk th
 What *does* stay contained to your user account:
 
 - Everything deployed in Step 2 lives strictly under `$HOME/.config/` and `$HOME/.local/`
-- `omarchy update` will not overwrite anything this repo deploys under `.config`/`.local` — those are user files by Omarchy convention
+- `omarchy update` can still edit some of those files through its migrations. That's expected, and the next `install.sh` run asks before replacing any file it changed (see [How dotfiles are deployed](#how-dotfiles-are-deployed))
 - No secrets are committed: API tokens, credentials, and private keys are excluded and expected to live in standard local state paths (`~/.local/state/`)
 
 ---

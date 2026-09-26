@@ -11,14 +11,21 @@ file adds the rules specific to this repo and this hardware.
 | `install.sh` | Orchestrator. Idempotent; safe to re-run. |
 | `bin/egismoc-fingerprint` | EgisTec fingerprint command, linked into `~/.local/bin` |
 | `lib/ui.sh` | Shared prompt/log/sudo helpers, sourced by both scripts |
+| `lib/dotfiles.sh` | Dotfile deployment: drift check, removals, deploy state |
 | `packages/libfprint-egismoc-sdcp/PKGBUILD` | Pinned SDCP driver recipe |
 | `packages/*.pkg.tar.zst` + `.sha256sums` | Archived driver binary and its checksum |
-| `.config/`, `.local/` | Deployed into `$HOME` by `install.sh` Step 2 (copied, with backups) |
+| `.config/`, `.local/` | Copied into `$HOME` by `install.sh` Step 2 |
 | `.config/omarchy/hooks/` | `pre-refresh-pacman`, `post-update`, `post-boot` hooks |
+| `tests/` | Sandbox tests; `tests/run.sh` (CI runs it on every push) |
 
-Edit files **here**, then run `./install.sh` (or copy the one file) to deploy.
-Editing `~/.config` directly works too, but the change is lost on the next deploy
-unless it is copied back into this repo.
+Only files that **differ from Omarchy's defaults** belong in `.config/`. Don't add
+a file that's identical to Omarchy's (`/etc/skel/<path>` on the machine), and
+suggest removing one that has drifted back to stock: tracked copies override
+Omarchy's updates to that file.
+
+Edit files **here**, then run `./install.sh` to deploy. If a file in `~/.config`
+changed since the last deploy (a hand edit, an Omarchy migration, an app),
+`install.sh` asks before replacing it, and can copy it back into the repo.
 
 ## Hard rules
 
@@ -67,6 +74,11 @@ When upstream libfprint merges SDCP for egismoc (MR !547) and Omarchy's
 ## Checks before committing
 
 ```bash
-bash -n install.sh bin/egismoc-fingerprint lib/ui.sh .config/omarchy/hooks/*/*.hook
-shellcheck -x install.sh bin/egismoc-fingerprint
+shellcheck -x install.sh bin/egismoc-fingerprint lib/*.sh tests/*.sh tests/lib/*.sh \
+  .config/omarchy/hooks/theme-set .config/omarchy/hooks/*/*.hook
+tests/run.sh
 ```
+
+Add or update a test in `tests/run.sh` for any behavior change. Tests run in a
+sandbox with stubbed Omarchy/pacman/sudo commands (`tests/lib/sandbox.sh`), so
+they are safe to run anywhere.

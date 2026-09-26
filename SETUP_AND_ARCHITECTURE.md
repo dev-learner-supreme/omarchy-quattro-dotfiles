@@ -151,30 +151,35 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 ├── install.sh                     # This setup script (orchestrator)
 ├── bin/egismoc-fingerprint        # EgisTec fingerprint setup/status/check → ~/.local/bin
 ├── lib/ui.sh                      # Shared prompt/log/sudo helpers
+├── lib/dotfiles.sh                # Dotfile deployment (drift check, removals)
 ├── packages/                      # Pinned driver PKGBUILD + checksum-verified binary
+├── tests/                         # Sandbox tests (tests/run.sh), run by CI
+├── .github/workflows/ci.yml       # ShellCheck + tests on every push
 ├── CLAUDE.md (AGENTS.md)          # Guide for coding agents
 ├── SETUP_AND_ARCHITECTURE.md      # This guide
 ├── .bashrc                        # SSH socket + Android SDK
 ├── .zshrc                         # Starship + eza aliases + zsh plugins
-├── .config/
-│   ├── ghostty/config             # command = /usr/bin/zsh, JetBrainsMono
+├── .config/                       # Only files that differ from Omarchy's defaults
+│   ├── ghostty/config             # command = /usr/bin/zsh, font-size 12
+│   ├── git/config                 # Identity + gh credential helper
 │   ├── hypr/
 │   │   ├── bindings.lua           # F7, F8, Super+Shift+S, Alt+Space
 │   │   ├── hyprland.lua           # Emulator/QEMU window rules
-│   │   └── input.lua, looknfeel.lua, monitors.lua, autostart.lua
+│   │   └── input.lua              # Key repeat, touchpad, gestures
 │   ├── omarchy/
 │   │   ├── shell.json             # Status bar layout & widgets
 │   │   ├── hooks/theme-set        # Theme change automation
 │   │   ├── hooks/{pre-refresh-pacman,post-update,post-boot}.d/  # Driver pin + health check
 │   │   └── extensions/omarchy-menu.jsonc  # Routes Setup > Security > Fingerprint
-│   ├── wireplumber/               # Audio sink priority rules
-│   ├── starship.toml, btop/btop.conf, lazygit/config.yml
-│   ├── git/config                 # Aliases, rerere, histogram diff
-│   ├── alacritty/, foot/, kitty/
-│   └── ...
+│   └── wireplumber/               # Audio sink priority rules
 └── .local/
     └── share/wireplumber/scripts/ # SOF jack autoswitcher
 ```
+
+Everything not listed (alacritty, foot, kitty, btop, lazygit, starship,
+`looknfeel.lua`, `monitors.lua`, ...) is left as Omarchy ships it, so Omarchy's
+updates keep reaching it. Deployment rules are in the README under
+*How dotfiles are deployed*.
 
 ---
 
@@ -183,7 +188,7 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 | Step | Action | Omarchy API Used |
 | :--- | :--- | :--- |
 | **1** | Install official packages (omarchy-zsh, zsh-autosuggestions, usbutils, restic, rclone); Ghostty as default terminal | `omarchy-pkg-add`, `omarchy-install-terminal`, `omarchy-default-terminal` |
-| **2** | Back up existing configs to `~/.dotfiles-backup/`; deploy all dotfiles; link `egismoc-fingerprint` into `~/.local/bin` | File copy with backup |
+| **2** | Deploy dotfiles: add/update the repo's files, replace untouched Omarchy defaults (backed up), ask before replacing anything changed on this machine, remove files deleted from the repo; link `egismoc-fingerprint` into `~/.local/bin` | `lib/dotfiles.sh` (compares against `/etc/skel`) |
 | **3** | EgisTec sensor → `egismoc-fingerprint setup` (see above); other sensor → Omarchy's wizard; failure doesn't stop the install | `omarchy-hw-fingerprint`, `omarchy-setup-security-fingerprint`, `omarchy-plugin-clone` |
 | **4** | Prompt for optional AUR packages (hyprmoncfg, brave-origin) | `omarchy-pkg-aur-add`, `omarchy-install-browser` |
 | **5** | Enable systemd `ssh-agent.socket`; write `environment.d` config; configure `~/.ssh/config` | `systemctl --user` |

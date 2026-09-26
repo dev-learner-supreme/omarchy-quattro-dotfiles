@@ -184,6 +184,7 @@ What *does* stay contained to your user account:
 
 ## Documentation Guides
 
+- [Omarchy-Setup-Explained.pdf](Omarchy-Setup-Explained.pdf) — the whole repo explained in plain English (start here if you're not technical)
 - [CLAUDE.md](CLAUDE.md) — guide for coding agents (Claude Code, Codex via `AGENTS.md`)
 - [packages/libfprint-egismoc-sdcp/](packages/libfprint-egismoc-sdcp/) — the pinned driver recipe and how to bump it
 - [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md) — complete setup architecture, package breakdown, EgisTec fingerprint configuration, and recovery instructions

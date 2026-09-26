@@ -78,7 +78,7 @@ cd ~/dotfiles
 |---|---|
 | Pre-flight | Confirms this is an Omarchy install, warns if the detected version looks pre-Quattro, refuses to run a second instance concurrently, keeps `sudo` alive for the run |
 | 1 | Installs official packages (`omarchy-zsh`, `zsh-autosuggestions`, `usbutils`) and Ghostty |
-| 2 | Detects EgisTec Match-on-Chip fingerprint hardware, installs the SDCP driver (checksum-tracked), configures PAM for sudo / polkit / lock screen — automatically backed up beforehand and rolled back if anything fails |
+| 2 | Detects EgisTec Match-on-Chip fingerprint hardware, installs the SDCP driver (checksum-verified archived binary, or built from the pinned [PKGBUILD](packages/libfprint-egismoc-sdcp/)), configures PAM for sudo / polkit / lock screen — backed up beforehand and rolled back if the edit fails or is interrupted |
 | 3 | Prompts for optional AUR packages (`hyprmoncfg`, `brave-origin-bin`) |
 | 4 | Backs up any conflicting existing configs, then deploys `.config` and `.local` files |
 | 5 | Configures the native SSH agent via systemd socket activation |
@@ -95,14 +95,15 @@ cd ~/dotfiles
 
 | Guard | What it protects against |
 |---|---|
-| Lockfile (`~/.cache/omarchy-dotfiles-install.lock`) | Two copies of the installer running at once |
+| Lockfile (`~/.cache/omarchy-dotfiles-install.lock`) | Two copies of the installer running at once; a lock left by a killed run is detected by PID and cleared |
 | `sudo` keep-alive | The `sudo` timestamp expiring mid-run and re-prompting unpredictably |
-| PAM backup before edit | `/etc/pam.d/sudo` and `/etc/pam.d/polkit-1` are copied to `~/.dotfiles-backup/<timestamp>/pam/` before any edit |
-| Auto-restore on failure | If any step fails after the PAM backup exists, both files are restored automatically |
-| Line-count sanity check | PAM edits only ever insert lines; a file that comes out *shorter* than its backup triggers an immediate restore, not a silent continue |
-| Checksum tracking for the cached fingerprint driver binary | A changed hash under the same filename is flagged, not silently trusted and overwritten |
-| AUR reachability check | Network issues are caught before a `yay` build starts, not partway through |
-| Final `sudo -v` check | The last thing the script does is confirm `sudo` still works, and tells you explicitly not to close the terminal if it doesn't |
+| PAM backup before edit | `/etc/pam.d/sudo`, `polkit-1` and `omarchy-lock-fingerprint` are copied to `~/.dotfiles-backup/<timestamp>/pam/` before any edit |
+| Scoped auto-restore | If the PAM edit fails or is interrupted (Ctrl-C), all three files are restored. A later, unrelated failure (e.g. Step 5) leaves a completed PAM setup alone |
+| PAM sanity checks | Edits only ever insert lines, and sudo/polkit must still reach `system-auth`/`pam_unix` (password fallback); either check failing triggers an immediate restore |
+| Checksum-verified driver install | A cached driver binary is installed only if its sha256 matches `packages/.sha256sums`; unlisted or tampered binaries are ignored with a warning |
+| Pinned source build | With no verified binary, the driver is built from the repo's own pinned [PKGBUILD](packages/libfprint-egismoc-sdcp/) — never from the AUR — after a network check |
+| Real PAM re-auth at the end | `sudo -k true` re-authenticates through the edited stack (fingerprint or password) without dropping the cached session; if it fails, you're offered a one-step restore |
+| `-y` takes defaults | Unattended mode answers each prompt with its default, so default-No prompts stay No |
 
 ---
 
@@ -113,7 +114,7 @@ cd ~/dotfiles
 > - Edits `/etc/pam.d/sudo` and `/etc/pam.d/polkit-1` to add fingerprint authentication
 > - Writes `/etc/pam.d/omarchy-lock-fingerprint` for the session lock screen
 > - May edit `/etc/pacman.conf` (`IgnorePkg`) to pin the fingerprint driver against updates
-> - Installs a system package (`libfprint-egismoc-sdcp-git`) via `pacman -U`, replacing stock `libfprint`
+> - Installs a system package (`libfprint-egismoc-sdcp-git`) via `pacman -U`, replacing stock `libfprint` — see [packages/libfprint-egismoc-sdcp/](packages/libfprint-egismoc-sdcp/) for the pinned recipe
 >
 > These changes are backed up automatically and rolled back on failure (see [Safety Guards](#safety-guards)), but they are genuine system-level edits — review Step 2 in [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md) before running on a new machine, particularly one without EgisTec fingerprint hardware where this step should just no-op.
 

@@ -55,7 +55,6 @@ graph TD
 
 | Package | Purpose | Install Notes |
 | :--- | :--- | :--- |
-| **`libfprint-egismoc-sdcp-git`** | SDCP driver for EgisTec MOC sensors | `--nocheck` (appstream network test), locked in `IgnorePkg` |
 | **`hyprmoncfg`** | Multi-monitor TUI & daemon | Required for <kbd>F7</kbd> display toggle |
 | **`brave-origin-bin`** | Minimalist Brave browser | Installed via `omarchy install browser brave-origin` |
 
@@ -69,14 +68,17 @@ for EgisTec Match-on-Chip sensors (`1c7a:0582`–`05a5`). Without it, the sensor
 cryptographic key desyncs and enrollments disappear after the first verification.
 
 ### Applied Solution
-1. **Driver**: `libfprint-egismoc-sdcp-git` compiled with `--nocheck`
-   (bypasses `appstreamcli validate` network 404 on upstream URL).
+1. **Driver**: `libfprint-egismoc-sdcp-git`, built from this repo's own
+   [pinned PKGBUILD](packages/libfprint-egismoc-sdcp/) (TenSeventy7's SDCP
+   fork at commit `4d128d4`) — not from the AUR. `install.sh` prefers the
+   archived binary, and installs it only if its sha256 matches
+   `packages/.sha256sums`.
 2. **Update Lock**: [`/etc/pacman.conf`](file:///etc/pacman.conf) —
    `IgnorePkg = libfprint libfprint-egismoc-sdcp-git`.
    Prevents `omarchy update`, `pacman -Syu`, and `yay -Sua` from overwriting.
-3. **Offline Archive**: Pre-compiled `.pkg.tar.zst` in both
-   `/var/cache/pacman/pkg/` and `~/.local/share/packages/` for instant
-   1-second offline reinstallation.
+3. **Offline Archive**: Pre-compiled `.pkg.tar.zst` in `packages/`,
+   `/var/cache/pacman/pkg/` and `~/.local/share/packages/` for offline
+   reinstallation.
 4. **PAM Integration**: `auth sufficient pam_fprintd.so` in sudo/polkit/lock,
    with clamshell gate (`omarchy-hw-laptop-closed`) that skips fingerprint
    when the laptop lid is closed.
@@ -87,8 +89,12 @@ cryptographic key desyncs and enrollments disappear after the first verification
 
 ### Recovery
 ```bash
-# Reinstall from cached binary (no compilation needed)
-sudo pacman -U ~/.local/share/packages/libfprint-egismoc-sdcp-git-*.pkg.tar.zst
+# Reinstall from the archived binary (verify it first — must match packages/.sha256sums)
+(cd packages && sha256sum -c .sha256sums)
+sudo pacman -U packages/libfprint-egismoc-sdcp-git-*.pkg.tar.zst
+
+# Or rebuild from the pinned recipe
+(cd packages/libfprint-egismoc-sdcp && makepkg -si)
 
 # Re-enroll fingerprint directly (avoids pacman conflicts with stock libfprint)
 fprintd-enroll "$USER"
@@ -153,12 +159,11 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 | Step | Action | Omarchy API Used |
 | :--- | :--- | :--- |
 | **1** | Install official packages (omarchy-zsh, zsh-autosuggestions, fprintd, usbutils) | `omarchy-pkg-add` |
-| **2** | Detect EgisTec MOC sensor; install SDCP driver if needed; archive offline package; lock in IgnorePkg; configure clamshell + persistent lock PAM | `omarchy-hw-fingerprint`, `fprintd-enroll` |
+| **2** | Detect EgisTec MOC sensor; install SDCP driver (verified binary or pinned PKGBUILD build); archive offline package; lock in IgnorePkg; configure clamshell + persistent lock PAM | `omarchy-hw-fingerprint`, `fprintd-enroll` |
 | **3** | Prompt for optional AUR packages (hyprmoncfg, brave-origin) | `omarchy-pkg-aur-add`, `omarchy install browser` |
 | **4** | Back up existing configs to `~/.dotfiles-backup/`; deploy all dotfiles | File copy with backup |
 | **5** | Enable systemd `ssh-agent.socket`; write `environment.d` config; configure `~/.ssh/config` | `systemctl --user` |
-| **6** | Register & enable 3 Omarchy shell plugins | `omarchy plugin add --enable --yes` |
-| **7** | Reload WirePlumber, Hyprland, Omarchy Shell | `hyprctl reload`, `omarchy restart shell` |
+| **6** | Reload WirePlumber, Hyprland, Omarchy Shell; re-authenticate sudo through the edited PAM stack | `hyprctl reload`, `omarchy restart shell`, `sudo -k` |
 
 ---
 
@@ -177,10 +182,10 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 
 | Concern | Protection |
 | :--- | :--- |
-| `omarchy update` replaces fingerprint driver | `IgnorePkg` in pacman.conf blocks both `libfprint` and the AUR package |
+| `omarchy update` replaces fingerprint driver | `IgnorePkg` in pacman.conf blocks both `libfprint` and `libfprint-egismoc-sdcp-git` |
 | `omarchy refresh pacman` wipes pacman.conf | Native `pre-refresh-pacman.d` hook automatically re-locks `IgnorePkg` before `pacman -Syyuu` runs |
 | `omarchy update` overwrites dotfiles | All configs live in `~/.config/` — Omarchy never touches user configs |
-| AUR rebuild fails the appstream test | Pre-compiled binary archived in `~/.local/share/packages/` and `/var/cache/pacman/pkg/` |
+| Driver source disappears or changes upstream | Build is pinned to one commit, and a checksum-verified binary is archived in `packages/`, `~/.local/share/packages/` and `/var/cache/pacman/pkg/` |
 | Sensor fails / locked out | PAM uses `sufficient` — password fallback always works |
 | Docked with lid closed | Clamshell gate skips fingerprint, goes straight to password |
 

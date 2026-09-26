@@ -15,21 +15,24 @@
 #
 # Usage:
 #   ./install.sh          # Interactive mode (prompts for AUR/optional steps)
-#   ./install.sh -y       # Unattended mode (accepts all defaults)
+#   ./install.sh -y       # Unattended mode (takes each prompt's default answer)
 #
 # Safety notes:
 #   - Refuses to run if Omarchy itself isn't detected, and warns (doesn't
 #     block) if the detected version looks pre-Quattro.
-#   - Refuses to run two copies of itself concurrently.
+#   - Refuses to run two copies of itself concurrently (stale locks from a
+#     killed run are detected and cleared).
 #   - Keeps sudo alive for the duration of the run instead of letting the
 #     timestamp expire mid-script.
-#   - Backs up /etc/pam.d/sudo and /etc/pam.d/polkit-1 before editing them,
-#     and automatically restores them if anything fails partway through.
-#   - Tracks a sha256 for the cached fingerprint driver binary and refuses
-#     to silently overwrite the archived copy if it ever changes unexpectedly.
-#   - Confirms sudo still works at the very end, before you close the terminal.
+#   - Backs up /etc/pam.d/{sudo,polkit-1,omarchy-lock-fingerprint} before
+#     editing them, and restores them if a PAM edit fails or is interrupted.
+#   - Installs the cached fingerprint driver only if its sha256 matches
+#     packages/.sha256sums; otherwise builds it from the pinned PKGBUILD in
+#     packages/libfprint-egismoc-sdcp/ (never from the AUR).
+#   - Re-authenticates sudo through the edited PAM stack at the end (without
+#     dropping the cached sudo session) and offers to roll back if it fails.
 # ==============================================================================
-set -euo pipefail
+set -Eeuo pipefail
 
 # ---------------------------------------------------------------------------
 # Bootstrap
@@ -46,9 +49,24 @@ fi
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_DIR="$HOME/.dotfiles-backup/$(date +%Y%m%d_%H%M%S)"
 PAM_BACKUP_DIR="$BACKUP_DIR/pam"
+PAM_FILES=(sudo polkit-1 omarchy-lock-fingerprint)
+PAM_EDIT_ACTIVE=0
 ASSUME_YES=0
 
-[[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]] && ASSUME_YES=1
+DRIVER_PKG="libfprint-egismoc-sdcp-git"
+DRIVER_PKGBUILD_DIR="$DOTFILES_DIR/packages/libfprint-egismoc-sdcp"
+DRIVER_CHECKSUMS="$DOTFILES_DIR/packages/.sha256sums"
+DRIVER_CACHE_DIRS=("$DOTFILES_DIR/packages" "$HOME/.local/share/packages" /var/cache/pacman/pkg)
+
+usage() { echo "Usage: $0 [-y|--yes] [-h|--help]"; }
+
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes)  ASSUME_YES=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *)         usage >&2; exit 2 ;;
+  esac
+done
 
 # ---------------------------------------------------------------------------
 # Helpers — match Omarchy's own styling conventions
@@ -61,7 +79,10 @@ fail() { echo -e "\e[31mError: $*\e[0m" >&2; exit 1; }
 confirm() {
   local prompt="$1"
   local default="${2:-true}"
-  (( ASSUME_YES )) && return 0
+  if (( ASSUME_YES )); then
+    [[ "$default" == "true" ]]
+    return
+  fi
 
   if [[ -t 0 && -t 1 ]] && command -v gum &>/dev/null; then
     if [[ "$default" == "true" ]]; then
@@ -88,43 +109,101 @@ confirm() {
 # ---------------------------------------------------------------------------
 # PAM backup/restore — shared by the error trap and Step 2
 # ---------------------------------------------------------------------------
+backup_pam_files() {
+  mkdir -p "$PAM_BACKUP_DIR"
+  local name
+  for name in "${PAM_FILES[@]}"; do
+    if [[ -f "/etc/pam.d/$name" ]]; then
+      cp "/etc/pam.d/$name" "$PAM_BACKUP_DIR/$name"
+    else
+      touch "$PAM_BACKUP_DIR/.$name-created"
+    fi
+  done
+}
+
 restore_pam_backup() {
-  [[ -f "$PAM_BACKUP_DIR/sudo" ]] && sudo cp "$PAM_BACKUP_DIR/sudo" /etc/pam.d/sudo
-  [[ -f "$PAM_BACKUP_DIR/polkit-1" ]] && sudo cp "$PAM_BACKUP_DIR/polkit-1" /etc/pam.d/polkit-1
-  [[ -f "$PAM_BACKUP_DIR/.polkit-1-created" ]] && sudo rm -f /etc/pam.d/polkit-1
+  local name
+  for name in "${PAM_FILES[@]}"; do
+    if [[ -f "$PAM_BACKUP_DIR/$name" ]]; then
+      sudo cp "$PAM_BACKUP_DIR/$name" "/etc/pam.d/$name"
+    elif [[ -f "$PAM_BACKUP_DIR/.$name-created" ]]; then
+      sudo rm -f "/etc/pam.d/$name"
+    fi
+  done
   info "PAM files restored from $PAM_BACKUP_DIR."
 }
 
+pam_changed_this_run() {
+  local name
+  for name in "${PAM_FILES[@]}"; do
+    if [[ -f "$PAM_BACKUP_DIR/$name" ]]; then
+      cmp -s "$PAM_BACKUP_DIR/$name" "/etc/pam.d/$name" || return 0
+    elif [[ -f "$PAM_BACKUP_DIR/.$name-created" && -f "/etc/pam.d/$name" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------------------
-# Error trap — prints the failing line instead of dying silently, and rolls
-# back PAM edits automatically if a backup exists (i.e. Step 2 was mid-flight).
+# Error/interrupt traps — print the failing line instead of dying silently.
+# PAM is rolled back only while PAM_EDIT_ACTIVE=1, so a later unrelated
+# failure (e.g. ssh-agent in Step 5) doesn't undo a completed PAM setup.
+# set -E above is what makes this trap fire inside functions.
 # ---------------------------------------------------------------------------
+rollback_pam_if_mid_edit() {
+  if (( PAM_EDIT_ACTIVE )); then
+    PAM_EDIT_ACTIVE=0
+    warn "PAM edit was in progress — restoring pre-edit PAM files..."
+    restore_pam_backup
+  fi
+}
+
 on_error() {
   local exit_code=$?
   local line_no=$1
+  trap - ERR
   echo -e "\e[31m\nScript failed at line $line_no (exit code $exit_code).\e[0m" >&2
-  if [[ -d "${PAM_BACKUP_DIR:-}" ]] && [[ -n "$(ls -A "$PAM_BACKUP_DIR" 2>/dev/null)" ]]; then
-    warn "Restoring /etc/pam.d/sudo and /etc/pam.d/polkit-1 from backup due to failure..."
-    restore_pam_backup
-  fi
+  rollback_pam_if_mid_edit
   exit "$exit_code"
 }
 trap 'on_error $LINENO' ERR
 
+on_interrupt() {
+  trap - ERR INT TERM
+  echo -e "\e[31m\nInterrupted.\e[0m" >&2
+  rollback_pam_if_mid_edit
+  exit 130
+}
+trap on_interrupt INT TERM
+
 # ---------------------------------------------------------------------------
-# Lockfile — refuse to run two copies of this script at once
+# Lockfile — refuse to run two copies of this script at once. The owning PID
+# is recorded so a lock left behind by a killed run can be cleared safely.
 # ---------------------------------------------------------------------------
 LOCK_DIR="$HOME/.cache/omarchy-dotfiles-install.lock"
+LOCK_OWNED=0
+mkdir -p "$(dirname "$LOCK_DIR")"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  fail "Another instance of install.sh appears to be running (found $LOCK_DIR). Remove it manually if that's not the case."
+  lock_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [[ -z "$lock_pid" ]]; then
+    fail "Found $LOCK_DIR with no owner PID. If no other install.sh is running, remove it and re-run."
+  elif kill -0 "$lock_pid" 2>/dev/null; then
+    fail "Another instance of install.sh is running (PID $lock_pid)."
+  fi
+  warn "Clearing stale lock left by PID $lock_pid (no longer running)."
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR" || fail "Could not acquire $LOCK_DIR."
 fi
+echo "$$" > "$LOCK_DIR/pid"
+LOCK_OWNED=1
 
 cleanup() {
   if [[ -n "${SUDO_KEEPALIVE_PID:-}" ]]; then
     kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
   fi
-  if [[ -d "${LOCK_DIR:-}" ]]; then
-    rmdir "$LOCK_DIR" 2>/dev/null || true
+  if (( LOCK_OWNED )); then
+    rm -rf "$LOCK_DIR"
   fi
 }
 trap cleanup EXIT
@@ -158,8 +237,11 @@ fi
 
 # Keep sudo alive for the whole run instead of letting the timestamp expire
 # mid-script and re-prompting unexpectedly. Killed automatically on exit via cleanup().
+# The subshell drops the inherited traps and errexit: a failed refresh must
+# not fire on_error (and a PAM rollback) from the background.
 sudo -v
-( while true; do sudo -n true 2>/dev/null; sleep 60; kill -0 "$$" 2>/dev/null || exit; done ) &
+( trap - ERR INT TERM EXIT; set +e
+  while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null; sleep 60; done ) &
 SUDO_KEEPALIVE_PID=$!
 
 # ---------------------------------------------------------------------------
@@ -217,9 +299,8 @@ archive_driver_pkg() {
 
   # Track a checksum for the archived binary. If a future run finds a
   # differently-hashed package under the same filename, refuse to silently
-  # overwrite the archived copy — that shouldn't happen with a pinned AUR
-  # git package and is worth a human looking at.
-  local checksum_file="$DOTFILES_DIR/packages/.sha256sums"
+  # overwrite the archived copy — worth a human looking at.
+  local checksum_file="$DRIVER_CHECKSUMS"
   local pkg_name pkg_hash recorded_hash=""
   pkg_name="$(basename "$pkg")"
   pkg_hash="$(sha256sum "$pkg" | awk '{print $1}')"
@@ -245,6 +326,57 @@ archive_driver_pkg() {
   info "Archived driver binary for offline recovery (sha256: ${pkg_hash:0:12}...)."
 }
 
+# Prints the newest cached driver package whose sha256 matches an entry in
+# packages/.sha256sums. Unlisted or mismatched binaries are never returned.
+find_verified_driver_pkg() {
+  [[ -f "$DRIVER_CHECKSUMS" ]] || return 0
+  local hash name dir
+  while read -r hash name; do
+    [[ -n "$name" ]] || continue
+    for dir in "${DRIVER_CACHE_DIRS[@]}"; do
+      if [[ -f "$dir/$name" ]] && [[ "$(sha256sum "$dir/$name" | awk '{print $1}')" == "$hash" ]]; then
+        echo "$dir/$name"
+        return 0
+      fi
+    done
+  done < <(tac "$DRIVER_CHECKSUMS")
+}
+
+warn_unverified_driver_pkgs() {
+  local pkg
+  while IFS= read -r pkg; do
+    grep -qF " $(basename "$pkg")" "$DRIVER_CHECKSUMS" 2>/dev/null && continue
+    warn "Ignoring unverified cached driver (not in packages/.sha256sums): $pkg"
+  done < <(find "${DRIVER_CACHE_DIRS[@]}" -maxdepth 1 -name "$DRIVER_PKG-*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null || true)
+}
+
+build_driver_from_pkgbuild() {
+  [[ -f "$DRIVER_PKGBUILD_DIR/PKGBUILD" ]] || fail "Missing $DRIVER_PKGBUILD_DIR/PKGBUILD — cannot build the driver."
+  command -v makepkg &>/dev/null || fail "makepkg not found — cannot build the driver."
+  curl -fsI --max-time 10 https://github.com >/dev/null 2>&1 ||
+    fail "GitHub is unreachable — cannot fetch the driver source. Check your network and re-run."
+
+  # Build outside the repo so makepkg's src/, pkg/ and git clone never land in the dotfiles tree.
+  local work built
+  work="$(mktemp -d)"
+  mkdir -p "$work/out" "$work/src" "$work/build"
+  info "Building $DRIVER_PKG from the pinned PKGBUILD (this takes a minute)..."
+  # --nocheck mirrors the build that produced the archived binary; a manual
+  # `makepkg` in packages/libfprint-egismoc-sdcp/ runs the full test suite.
+  ( cd "$DRIVER_PKGBUILD_DIR" &&
+    PKGDEST="$work/out" SRCDEST="$work/src" BUILDDIR="$work/build" \
+      makepkg --syncdeps --rmdeps --cleanbuild --noconfirm --nocheck )
+
+  built="$(find "$work/out" -name "$DRIVER_PKG-*.pkg.tar.zst" ! -name "*debug*" | head -n 1 || true)"
+  [[ -n "$built" ]] || fail "makepkg finished but produced no $DRIVER_PKG package."
+
+  # --ask=4 answers pacman's "remove conflicting libfprint?" with yes, so the
+  # swap from stock libfprint happens in a single transaction.
+  sudo pacman -U --noconfirm --ask=4 "$built"
+  archive_driver_pkg "$built"
+  rm -rf "$work"
+}
+
 lock_pacman_driver() {
   local conf="/etc/pacman.conf"
   [[ -f "$conf" ]] || return 0
@@ -262,16 +394,25 @@ lock_pacman_driver() {
   fi
 }
 
-setup_pam_integration() {
-  # Back up both files before touching them. This backup is also what the
-  # global error trap (on_error) uses to auto-restore if anything below fails.
-  mkdir -p "$PAM_BACKUP_DIR"
-  [[ -f /etc/pam.d/sudo ]] && cp "/etc/pam.d/sudo" "$PAM_BACKUP_DIR/sudo"
-  if [[ -f /etc/pam.d/polkit-1 ]]; then
-    cp "/etc/pam.d/polkit-1" "$PAM_BACKUP_DIR/polkit-1"
-  else
-    touch "$PAM_BACKUP_DIR/.polkit-1-created"
+# Inserts LINE directly before the first line of FILE matching the ERE REGEX,
+# so new auth lines land after the #%PAM-1.0 header rather than above it.
+pam_insert_before() {
+  local file="$1" regex="$2" line="$3" tmp
+  if ! grep -qE "$regex" "$file"; then
+    warn "No line matching '$regex' in $file — not inserting: $line"
+    return 0
   fi
+  tmp="$(mktemp)"
+  awk -v re="$regex" -v l="$line" '!done && $0 ~ re { print l; done = 1 } { print }' "$file" > "$tmp"
+  sudo tee "$file" < "$tmp" >/dev/null
+  rm -f "$tmp"
+}
+
+setup_pam_integration() {
+  # Everything between here and PAM_EDIT_ACTIVE=0 is rolled back by the
+  # ERR/INT/TERM traps if it fails or is interrupted.
+  backup_pam_files
+  PAM_EDIT_ACTIVE=1
 
   # Only wire in the laptop-closed clamshell gate if the binary actually
   # exists on this system — pam_exec pointed at a missing binary logs a
@@ -297,59 +438,57 @@ setup_pam_integration() {
     fi
   done
 
-  # sudo: ensure pam_fprintd and clamshell gate are configured in correct sequence
-  if ! grep -q pam_fprintd.so /etc/pam.d/sudo 2>/dev/null; then
-    info "Configuring sudo for fingerprint authentication..."
-    sudo sed -i '1i auth      sufficient pam_fprintd.so' /etc/pam.d/sudo
-  fi
-  if [[ -n "$fprintd_gate" ]] && ! grep -q 'omarchy-hw-laptop-closed' /etc/pam.d/sudo 2>/dev/null; then
-    sudo sed -i "/pam_fprintd\.so/i $fprintd_gate" /etc/pam.d/sudo
-  fi
-
-  # polkit-1: ensure pam_fprintd and clamshell gate are configured in correct sequence
-  if [[ -f /etc/pam.d/polkit-1 ]]; then
-    if ! grep -q 'pam_fprintd.so' /etc/pam.d/polkit-1 2>/dev/null; then
-      info "Configuring polkit for fingerprint authentication..."
-      sudo sed -i '1i auth      sufficient pam_fprintd.so' /etc/pam.d/polkit-1
-    fi
-    if [[ -n "$fprintd_gate" ]] && ! grep -q 'omarchy-hw-laptop-closed' /etc/pam.d/polkit-1 2>/dev/null; then
-      sudo sed -i "/pam_fprintd\.so/i $fprintd_gate" /etc/pam.d/polkit-1
-    fi
-  else
-    sudo tee /etc/pam.d/polkit-1 >/dev/null <<EOF
-${fprintd_gate}
-auth      sufficient pam_fprintd.so
-auth      required pam_unix.so
-
-account   required pam_unix.so
-password  required pam_unix.so
-session   required pam_unix.so
+  # polkit-1: once /etc/pam.d/polkit-1 exists, Linux-PAM ignores the vendor
+  # copy in /usr/lib/pam.d, so start from that copy (or from system-auth)
+  # rather than a hand-rolled pam_unix-only stack.
+  if [[ ! -f /etc/pam.d/polkit-1 ]]; then
+    if [[ -f /usr/lib/pam.d/polkit-1 ]]; then
+      sudo cp /usr/lib/pam.d/polkit-1 /etc/pam.d/polkit-1
+    else
+      sudo tee /etc/pam.d/polkit-1 >/dev/null <<'EOF'
+#%PAM-1.0
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    include      system-auth
 EOF
+    fi
   fi
 
-  # Sanity check: a PAM edit should only ever grow these files (we insert
-  # lines, never delete any). If either file came out shorter than its
-  # backup, something went wrong — restore immediately rather than leaving
-  # a possibly-broken auth stack in place.
-  local orig_lines new_lines
-  if [[ -f "$PAM_BACKUP_DIR/sudo" ]]; then
-    orig_lines=$(wc -l < "$PAM_BACKUP_DIR/sudo")
-    new_lines=$(wc -l < /etc/pam.d/sudo)
-    if (( new_lines < orig_lines )); then
-      warn "/etc/pam.d/sudo has fewer lines after edit than before edit — restoring backup as a precaution."
-      restore_pam_backup
+  # sudo + polkit-1: pam_fprintd before the first auth line, clamshell gate
+  # directly before pam_fprintd (success=1 skips exactly that one line).
+  for pam_file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
+    [[ -f "$pam_file" ]] || continue
+    if ! grep -q 'pam_fprintd.so' "$pam_file"; then
+      info "Configuring $(basename "$pam_file") for fingerprint authentication..."
+      pam_insert_before "$pam_file" '^[[:space:]]*-?auth[[:space:]]' "auth      sufficient pam_fprintd.so"
+    fi
+    if [[ -n "$fprintd_gate" ]] && ! grep -q 'omarchy-hw-laptop-closed' "$pam_file"; then
+      pam_insert_before "$pam_file" 'pam_fprintd[.]so' "$fprintd_gate"
+    fi
+  done
+
+  # Sanity checks: edits only ever insert lines, and sudo/polkit must still
+  # have a password path (system-auth or pam_unix). Either failing means
+  # something went wrong — restore rather than leave a broken auth stack.
+  local name orig_lines new_lines
+  for name in sudo polkit-1; do
+    [[ -f "/etc/pam.d/$name" ]] || continue
+    if [[ -f "$PAM_BACKUP_DIR/$name" ]]; then
+      orig_lines=$(wc -l < "$PAM_BACKUP_DIR/$name")
+      new_lines=$(wc -l < "/etc/pam.d/$name")
+      if (( new_lines < orig_lines )); then
+        warn "/etc/pam.d/$name has fewer lines after edit than before — restoring backup as a precaution."
+        rollback_pam_if_mid_edit
+        fail "Aborting for safety. No PAM changes were left in place."
+      fi
+    fi
+    if ! grep -qE 'system-auth|pam_unix[.]so' "/etc/pam.d/$name"; then
+      warn "/etc/pam.d/$name has no password fallback (system-auth/pam_unix) — restoring backup."
+      rollback_pam_if_mid_edit
       fail "Aborting for safety. No PAM changes were left in place."
     fi
-  fi
-  if [[ -f "$PAM_BACKUP_DIR/polkit-1" ]]; then
-    orig_lines=$(wc -l < "$PAM_BACKUP_DIR/polkit-1")
-    new_lines=$(wc -l < /etc/pam.d/polkit-1)
-    if (( new_lines < orig_lines )); then
-      warn "/etc/pam.d/polkit-1 has fewer lines after edit than before edit — restoring backup as a precaution."
-      restore_pam_backup
-      fail "Aborting for safety. No PAM changes were left in place."
-    fi
-  fi
+  done
 
   # lock screen (Quickshell session lock):
   # timeout=-1 and max-tries=-1 prevent fprintd from timing out after 30s
@@ -362,6 +501,8 @@ auth       required                    pam_fprintd.so timeout=-1 max-tries=-1
 account    include                     system-local-login
 EOF
   fi
+
+  PAM_EDIT_ACTIVE=0
 }
 
 setup_egismoc_lock_plugin() {
@@ -431,6 +572,8 @@ activate_egismoc_lock_shell() {
       .cloneSourceRestores = ((.cloneSourceRestores // []) | if index($id) then . else . + [$id] end)
     ' "$shell_conf" > "$tmp_conf" && mv "$tmp_conf" "$shell_conf"
     info "Activated ${current_user}.lock in $shell_conf."
+  elif [[ -f "$shell_conf" ]]; then
+    warn "jq not found — could not enable ${current_user}.lock in $shell_conf; the stock lock screen stays active."
   fi
 
   if command -v omarchy-shell &>/dev/null && OMARCHY_SHELL_IPC_TIMEOUT=1s omarchy-shell shell ping &>/dev/null; then
@@ -447,47 +590,30 @@ if omarchy-hw-fingerprint; then
   # Check the USB bus for the specific EgisTec MOC vendor:product IDs.
   EGISMOC_IDS="1c7a:0582|1c7a:0583|1c7a:0584|1c7a:0586|1c7a:0587|1c7a:05a1|1c7a:05a5"
 
-  if lsusb | grep -qE "$EGISMOC_IDS" || pacman -Q libfprint-egismoc-sdcp-git &>/dev/null; then
+  # Here-string instead of a pipe: under pipefail, `lsusb | grep -q` can report
+  # failure when grep exits early and lsusb gets SIGPIPE.
+  if grep -qE "$EGISMOC_IDS" <<<"$(lsusb 2>/dev/null || true)" || pacman -Q "$DRIVER_PKG" &>/dev/null; then
     HAS_EGISMOC=1
     info "EgisTec Match-on-Chip sensor detected — requires SDCP driver."
 
-    if ! pacman -Q libfprint-egismoc-sdcp-git &>/dev/null; then
+    if ! pacman -Q "$DRIVER_PKG" &>/dev/null; then
       echo
       warn "Stock libfprint lacks SDCP support for this sensor."
       warn "Fingerprint enrollments disappear after first verify without the patched driver."
       echo
 
-      if confirm "Install libfprint-egismoc-sdcp-git from AUR? (replaces stock libfprint; a fresh build runs with --noconfirm, skipping PKGBUILD review)" true; then
-        # Prefer a pre-compiled binary from the local dotfiles repo, user archive, or pacman cache.
-        # This avoids the appstreamcli network-test failure during compilation.
-        CACHED_PKG=$(find "$DOTFILES_DIR/packages" "$HOME/.local/share/packages" /var/cache/pacman/pkg \
-          -name "libfprint-egismoc-sdcp-git-*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null | head -n 1 || true)
+      if confirm "Install the EgisTec SDCP driver ($DRIVER_PKG)? It replaces stock libfprint." true; then
+        warn_unverified_driver_pkgs
+        CACHED_PKG="$(find_verified_driver_pkg)"
 
         if [[ -n "$CACHED_PKG" ]]; then
-          info "Found pre-compiled package: $CACHED_PKG"
-          info "Package sha256: $(sha256sum "$CACHED_PKG" | awk '{print $1}')"
+          info "Installing checksum-verified package: $CACHED_PKG"
           # --ask=4 answers the "Remove libfprint?" conflict prompt with yes
           sudo pacman -U --noconfirm --ask=4 "$CACHED_PKG"
           archive_driver_pkg "$CACHED_PKG"
         else
-          # Building from source touches the network (AUR + any deps) — check
-          # reachability first instead of failing deep inside a yay build.
-          if command -v omarchy-pkg-aur-accessible &>/dev/null && ! omarchy-pkg-aur-accessible; then
-            fail "AUR is unreachable — cannot build libfprint-egismoc-sdcp-git. Check your network and re-run."
-          fi
-          command -v yay &>/dev/null || fail "yay is not installed — cannot build libfprint-egismoc-sdcp-git from AUR."
-
-          info "Compiling from AUR (bypassing appstream network test)..."
-          # Remove stock libfprint first (deps-only so fprintd stays if present)
-          if pacman -Q libfprint &>/dev/null && ! pacman -Q libfprint-egismoc-sdcp-git &>/dev/null; then
-            sudo pacman -Rdd --noconfirm libfprint
-          fi
-          yay -S --noconfirm --mflags="--nocheck" libfprint-egismoc-sdcp-git
-
-          BUILT_PKG=$(find "$HOME/.cache/yay/libfprint-egismoc-sdcp-git" \
-            -name "libfprint-egismoc-sdcp-git-*-x86_64.pkg.tar.zst" \
-            ! -name "*debug*" 2>/dev/null | head -n 1 || true)
-          archive_driver_pkg "$BUILT_PKG"
+          info "No checksum-verified cached package found."
+          build_driver_from_pkgbuild
         fi
 
         lock_pacman_driver
@@ -496,9 +622,7 @@ if omarchy-hw-fingerprint; then
       info "EgisTec SDCP driver already installed."
       lock_pacman_driver
       # Ensure all offline recovery locations are populated
-      CACHED_PKG=$(find "$DOTFILES_DIR/packages" "$HOME/.local/share/packages" /var/cache/pacman/pkg \
-        -name "libfprint-egismoc-sdcp-git-*.pkg.tar.zst" ! -name "*debug*" 2>/dev/null | head -n 1 || true)
-      archive_driver_pkg "$CACHED_PKG"
+      archive_driver_pkg "$(find_verified_driver_pkg)"
     fi
   fi
 
@@ -705,25 +829,36 @@ if command -v omarchy &>/dev/null; then
   info "Omarchy shell restarted."
 fi
 
-# Clean up empty backup directories
-if [[ -d "$PAM_BACKUP_DIR" ]] && [[ -z "$(ls -A "$PAM_BACKUP_DIR" 2>/dev/null)" ]]; then
-  rmdir "$PAM_BACKUP_DIR" 2>/dev/null || true
+# Final check: re-authenticate through the edited PAM stack. A plain `sudo -v`
+# would pass on the cached timestamp without touching PAM auth at all.
+# `sudo -k CMD` ignores the cached timestamp for this one command *without*
+# clearing it, so if the new stack is broken the still-cached session can
+# restore the backups.
+if [[ -d "$PAM_BACKUP_DIR" ]] && pam_changed_this_run; then
+  if (( ASSUME_YES )) || [[ ! -t 0 ]]; then
+    warn "PAM was changed. Before closing this terminal, verify in a NEW one: sudo -k true"
+    warn "Pre-edit PAM backups: $PAM_BACKUP_DIR"
+  else
+    info "Verifying sudo through the updated PAM stack (fingerprint or password)..."
+    if sudo -k true; then
+      info "sudo authentication works with the updated PAM stack."
+    else
+      warn "Fresh sudo authentication failed with the updated PAM stack."
+      if confirm "Restore the pre-edit PAM files from $PAM_BACKUP_DIR?" true; then
+        restore_pam_backup
+      else
+        warn "Left in place. Do NOT close this terminal until sudo works; backups are in $PAM_BACKUP_DIR."
+      fi
+    fi
+  fi
+elif [[ -d "$PAM_BACKUP_DIR" ]]; then
+  rm -rf "$PAM_BACKUP_DIR"
 fi
+
 if [[ -d "$BACKUP_DIR" ]] && [[ -z "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]]; then
   rmdir "$BACKUP_DIR" 2>/dev/null || true
 elif [[ -d "$BACKUP_DIR" ]]; then
   info "Previous configs backed up to: $BACKUP_DIR"
-fi
-
-# Final sanity check: confirm sudo still works before you close this terminal.
-# This is the single most important check after a PAM edit — if it fails,
-# do NOT close this window; open a fresh root shell (or use the backup at
-# $PAM_BACKUP_DIR) to fix /etc/pam.d/sudo before you lose your only sudo session.
-if sudo -v 2>/dev/null; then
-  info "sudo access confirmed working after setup."
-else
-  warn "Could not confirm sudo still works! Do NOT close this terminal."
-  warn "Backups of the pre-edit PAM files are at: $PAM_BACKUP_DIR"
 fi
 
 log "Setup complete!"

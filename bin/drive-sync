@@ -39,13 +39,17 @@ UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 TIMER_NAME="drive-sync.timer"
 SERVICE_NAME="drive-sync.service"
 BOOKMARKS_FILE="$HOME/.config/gtk-3.0/bookmarks"
+FILTERS_FILE="$DOTFILES_DIR/bin/drive-sync-filters.txt"
 
 # Google Docs/Sheets/Slides have no real byte size, which confuses bisync's
 # size/modtime comparison — skip them so they stay purely on the web, which is
 # where you'd open and edit them anyway. --fix-case avoids spurious conflicts
-# from Drive allowing names that differ only by case.
+# from Drive allowing names that differ only by case. The filters file (kept
+# in the repo, not here, so it's easy to find and edit) keeps developer junk
+# and this machine's own backup dumps out of what gets pulled down — see it
+# for what's excluded and why.
 COMMON_FLAGS=(--drive-skip-gdocs --fix-case --create-empty-src-dirs
-  --exclude ".DS_Store" --exclude ".~lock.*#" --exclude "*.tmp")
+  --filters-file "$FILTERS_FILE")
 
 # ------------------------------------------------------------------------------
 # Helpers

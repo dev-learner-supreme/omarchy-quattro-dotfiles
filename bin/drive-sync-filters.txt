@@ -1,0 +1,57 @@
+# Filters for `drive-sync` (rclone bisync --filters-file). Changing this file
+# forces a fresh --resync on the next run — rclone hashes it and refuses to
+# sync under stale rules — so after editing this, run `drive-sync setup`
+# again rather than waiting for the timer (see GOOGLE_DRIVE_SYNC_GUIDE.md).
+#
+# Unanchored patterns (no leading /) match at any depth, e.g. node_modules/**
+# reaches every project's node_modules, nested or not. A leading / anchors a
+# pattern to the Drive root only. See https://rclone.org/filtering/.
+#
+# Nothing here deletes anything on Drive — it only decides what this laptop
+# pulls into ~/GoogleDrive as local files.
+
+# --- Regenerable developer build/cache directories, not "your files" ---
+- node_modules/**
+- .git/**
+- build/**
+- dist/**
+- out/**
+- target/**
+- .gradle/**
+- .cxx/**
+- .next/**
+- .nuxt/**
+- .turbo/**
+- .parcel-cache/**
+- .cache/**
+- coverage/**
+- .nyc_output/**
+- __pycache__/**
+- .venv/**
+- venv/**
+- .mypy_cache/**
+- .pytest_cache/**
+- .tox/**
+- Pods/**
+- DerivedData/**
+- .terraform/**
+- .serverless/**
+
+# --- OS/editor/app junk ---
+- .DS_Store
+- Thumbs.db
+- *.tmp
+- *.log
+- .~lock.*#
+
+# --- This machine's own migration/backup dumps (root-anchored: these are
+# top-level Drive folders, not a pattern to chase into other projects) ---
+- /fedora-backup/**
+- /fedora latest files/**
+- /linux_migration_backup/**
+- /omarchy-backup/**
+- /DistroScripts/**
+
+# Everything else is included by default — no catch-all needed for a
+# blacklist like this one (only add "+ **" if you turn this into a
+# whitelist by ending it with "- *").

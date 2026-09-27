@@ -259,6 +259,17 @@ test_drive_sync_sync_runs_a_safe_recurring_bisync() {
   check "conflicts kept, never silently resolved" has "$SB/state/calls" 'conflict-resolve none'
   check "safe to run unattended" has "$SB/state/calls" 'resilient'
   check "delete safety guard set" has "$SB/state/calls" 'max-delete 10'
+  check "filters file applied" has "$SB/state/calls" 'filters-file .*drive-sync-filters.txt'
+}
+
+test_drive_sync_filters_exclude_dev_junk_and_this_machines_backups() {
+  sb_fresh
+  local f="$SB/repo/bin/drive-sync-filters.txt"
+  check "filters file exists" exists "$f"
+  check "node_modules excluded at any depth" has "$f" '^- node_modules/\*\*$'
+  check "git internals excluded" has "$f" '^- \.git/\*\*$'
+  check "this machine's fedora backup excluded" has "$f" '^- /fedora-backup/\*\*$'
+  check "this machine's omarchy backup excluded" has "$f" '^- /omarchy-backup/\*\*$'
 }
 
 test_drive_sync_sync_failure_raises_a_notification() {

@@ -66,6 +66,16 @@ rclone config
   you sign in and approve
 - "Configure as team drive?" → no, unless you actually use a Shared Drive
 
+**Before running `drive-sync setup`, check `bin/drive-sync-filters.txt`.** It
+excludes developer build junk (`node_modules`, `.git`, `build/`, caches, …) and
+this laptop's own migration/backup dumps (`fedora-backup`, `omarchy-backup`,
+`linux_migration_backup`, `DistroScripts`) from what gets pulled down — the
+first attempt at this, without it, started pulling down 1,600+ `node_modules`
+directories from an old project backup. If your Drive has other large folders
+you don't want mirrored locally (a personal backups folder, credential
+folders, etc.), add them there first — `rclone size "gdrive:Some Folder"`
+tells you how big one is before you decide.
+
 Then:
 ```bash
 drive-sync setup
@@ -74,6 +84,15 @@ This finds the `gdrive` remote, runs the one-time `--resync` baseline (compares
 your local folder and Drive, establishes a starting point — deletes nothing on
 either side), enables the 15-minute sync timer, and adds `~/GoogleDrive` to
 Nautilus's sidebar.
+
+**Changed the filters file later?** rclone hashes it and refuses to sync under
+stale rules, so the very next unattended run will fail loudly (you'll get the
+"sync failed" notification) rather than silently syncing under the old rules
+or the new ones inconsistently. Fix it with:
+```bash
+rm ~/.local/state/drive-sync/resync-done
+drive-sync setup
+```
 
 ## Living with it
 

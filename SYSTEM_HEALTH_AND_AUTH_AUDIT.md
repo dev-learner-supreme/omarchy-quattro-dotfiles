@@ -1,6 +1,11 @@
 # Omarchy Quattro System Health & Authentication Audit
 
-Comprehensive health report, PAM architecture analysis, hardware driver audit, and log diagnostics for **Omarchy 4** on Arch Linux, verified against the upstream [`omacom/omarchy`](https://github.com/omacom/omarchy) reference.
+Health report, PAM architecture, hardware driver audit, and log diagnostics for **Omarchy 4**
+on Arch Linux, checked against the upstream [`omacom/omarchy`](https://github.com/omacom/omarchy) reference.
+
+**Audited:** 27 September 2026, on the Acer Swift Go 14 (`drakonis`) right after `./install.sh` on a
+fresh Omarchy install. Every value below was read from the live system; the commands are in
+[section 5](#5-diagnostic-runbook-read-only-commands) if you want to re-check.
 
 ---
 
@@ -8,19 +13,23 @@ Comprehensive health report, PAM architecture analysis, hardware driver audit, a
 
 | Subsystem | Status | Details |
 | :--- | :---: | :--- |
-| **Operating System** | **Healthy** | Omarchy `4.0.3-1`, Linux kernel 6.x, Arch Linux rolling release |
+| **Operating System** | **Healthy** | Omarchy `4.0.4-1`, Linux `7.2.5-3-omarchy`, Arch Linux rolling release |
 | **Systemd Services (System)** | **Healthy** | `0` failed system units (`systemctl --failed`) |
 | **Systemd Services (User)** | **Healthy** | `0` failed user units (`systemctl --user --failed`) |
-| **Storage & Mounts** | **Healthy** | Root (`/dev/mapper/root`) has 451 GB available (5% used) |
-| **Memory & Swap** | **Healthy** | 15 GiB RAM (10 GiB available), 30 GiB swap (0% used) |
-| **Crash & Core Dumps** | **Clean** | `0` coredumps recorded (`coredumpctl list`) |
-| **Hyprland Compositor** | **Healthy** | Hyprland `0.56.2-2` via `uwsm`; `0` config errors (`hyprctl configerrors`) |
-| **Display / Monitor** | **Healthy** | Samsung OLED (2880x1800@90Hz, scale 2) on `eDP-1` |
-| **Audio Stack** | **Healthy** | PipeWire + WirePlumber active; priority rules and autoswitch active |
-| **Fingerprint Hardware** | **Active** | EgisTec MOC (`1c7a:0584`) bound to `libfprint-egismoc-sdcp-git` |
-| **fprintd Daemon** | **Active** | Static D-Bus service, active on demand, clean idle deactivation |
-| **Lockscreen Auth** | **Verified** | Quickshell session lock unlocked via finger scan in ~1s |
-| **Sudo PAM Stack** | **Operational** | Fingerprint prompt with password fallback; harmless cosmetic log noted |
+| **Storage & Mounts** | **Healthy** | Root (`/dev/mapper/root`) 475 GB, 451 GB available (5% used) |
+| **Memory** | **Healthy** | 15 GiB RAM, 11 GiB available |
+| **Crash & Core Dumps** | **Clean** | No coredumps (`coredumpctl list`) |
+| **Hyprland Compositor** | **Healthy** | Hyprland `0.56.2-2` via `uwsm`; no config errors (`hyprctl configerrors`) |
+| **Display / Monitor** | **Healthy** | Samsung OLED 2880x1800@90Hz on `eDP-1` |
+| **Audio Stack** | **Healthy** | PipeWire + WirePlumber `0.5.17`; priority rules and SOF autoswitch deployed |
+| **Fingerprint Hardware** | **Active** | EgisTec MOC (`1c7a:0584`) on `libfprint-egismoc-sdcp-git r1831.4d128d4-1`, 1 print enrolled |
+| **fprintd Daemon** | **Active** | `fprintd 1.94.5`, D-Bus activated on demand; no errors this boot |
+| **Lockscreen Auth** | **Verified** | Unlocked by finger twice this boot, ~1s each (journal) |
+| **Sudo / Polkit PAM** | **Operational** | Fingerprint, then password through `system-auth`; lid gate silenced with `quiet_log` |
+| **SSH Agent** | **Active** | `ssh-agent.socket` active; `AddKeysToAgent yes` |
+
+`egismoc-fingerprint status` reports `ok` on all eight rows (sensor, driver, pin, enrollment,
+sudo, polkit, lock PAM, lock plugin).
 
 ---
 
@@ -46,7 +55,7 @@ flowchart TD
   end
 
   subgraph Shell ["Desktop & Lock Layer"]
-    QS["omarchy-shell (Quickshell)<br/>Dual-stack: passwordPam + fingerprintPam"]
+    QS["omarchy-shell (Quickshell)<br/>arun.lock plugin (clone, 1500ms retry)<br/>passwordPam + fingerprintPam"]
   end
 
   USB --> SDCP --> FPRINTD
@@ -62,76 +71,84 @@ flowchart TD
 ### Sensor Specifications
 * **Device Identification:** `Bus 003 Device 004: ID 1c7a:0584 LighTuning Technology Inc. ETU905A88-E`
 * **Sensor Type:** EgisTec Match-on-Chip (MOC) capacitive touch sensor.
-* **Driver:** `libfprint-egismoc-sdcp-git r1831.4d128d4-1`
-* **Driver Protection:** Locked against upstream pacman upgrades in `/etc/pacman.conf`:
+* **Driver:** `libfprint-egismoc-sdcp-git r1831.4d128d4-1`, installed from the checksum-verified
+  archive in `packages/` and copied to `~/.local/share/packages/` and `/var/cache/pacman/pkg/`.
+* **Driver Protection:** Locked against upgrades in `/etc/pacman.conf`:
   ```ini
   HoldPkg = pacman glibc
   IgnorePkg = libfprint libfprint-egismoc-sdcp-git
   ```
-* **Post-Update Automation:** Hook scripts installed at:
-  * `~/.config/omarchy/hooks/post-update.d/lock-driver.hook`
-  * `~/.config/omarchy/hooks/pre-refresh-pacman.d/lock-driver.hook`
-  These ensure `IgnorePkg` and `/etc/pam.d/omarchy-lock-fingerprint` persist across `omarchy update` cycles.
+* **Update & Boot Automation** (deployed to `~/.config/omarchy/hooks/`):
+  * `pre-refresh-pacman.d/lock-driver.hook` — re-adds `IgnorePkg` when `omarchy refresh pacman` resets `pacman.conf`
+  * `post-update.d/lock-driver.hook` — re-checks `IgnorePkg`, repairs the lock-screen PAM timeout and the
+    lid gate's `quiet_log` if a migration changed them, then runs `egismoc-fingerprint check`
+  * `post-boot.d/egismoc-check.hook` — runs `egismoc-fingerprint check` (no sudo)
+
+  `check` raises a clickable notification if the driver was replaced, and rebuilds the `arun.lock`
+  clone if Omarchy changed its stock lock screen. The hooks reach it through the
+  `~/.local/bin/egismoc-fingerprint` symlink into the repo; see
+  [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md#the-repo-folder-must-stay-put).
 
 ---
 
 ## 3. PAM & Log Diagnostics
 
-### A. The "Exit Code 1" Log Mystery in `journalctl`
+### A. The "Exit Code 1" Log Noise — resolved
 
-#### The Observed Log Entry
+#### The Original Log Entry
 ```text
 polkit-agent-helper-1[24366]: pam_exec(polkit-1:auth): /usr/bin/omarchy-hw-laptop-closed failed: exit code 1
 ```
 
-#### Detailed Root Cause
-In `/etc/pam.d/sudo` and `/etc/pam.d/polkit-1`, the clamshell gate is declared as:
+#### Root Cause
+Omarchy's stock clamshell gate is:
 ```pam
 auth [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed
-auth sufficient pam_fprintd.so
 ```
 
-1. When your laptop lid is **open** (normal use), `/usr/bin/omarchy-hw-laptop-closed` returns exit code **`1`**.
-2. The PAM evaluation rule `[default=ignore]` handles this as expected: it ignores the non-zero status and advances to the next rule (`pam_fprintd.so`), allowing fingerprint authorization to proceed.
-3. However, under `Linux-PAM` (v1.7+), the `quiet` module argument **only suppresses conversational output sent to the user terminal**; it **does NOT suppress logging to syslog/journald**.
-4. PAM treats any non-zero exit code as an execution failure unless explicitly silenced with the `quiet_log` argument.
-5. **Verdict:** **Completely harmless.** The gate behaves as intended. The message in `journalctl` is cosmetic noise caused by upstream omitting `quiet_log`.
+1. When the lid is **open**, `omarchy-hw-laptop-closed` exits **`1`**.
+2. `[default=ignore]` skips past that and moves on to `pam_fprintd.so`, as intended.
+3. `pam_exec`'s `quiet` only suppresses messages to the user; it still logs a non-zero exit to the journal.
+4. Only `quiet_log` silences that log line.
 
-> [!TIP]
-> To silence these cosmetic error lines completely in system logs, append `quiet_log` to the rule:
-> ```pam
-> auth [success=1 default=ignore] pam_exec.so quiet quiet_log /usr/bin/omarchy-hw-laptop-closed
-> ```
+#### Current State
+`egismoc-fingerprint setup` installs the gate with `quiet_log`, and the post-update hook re-adds it if
+a migration puts back the stock line. This boot's journal has **0** `omarchy-hw-laptop-closed failed`
+entries.
 
 ---
 
-### B. Sudo PAM Stack Analysis
+### B. Sudo PAM Stack
 
 #### Configuration (`/etc/pam.d/sudo`)
 ```pam
-auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed
-auth      sufficient pam_fprintd.so
 #%PAM-1.0
-auth      include    system-auth
-account   include    system-auth
-session   include    system-auth
-session   optional   pam_systemd.so class=none
+auth      [success=1 default=ignore] pam_exec.so quiet quiet_log /usr/bin/omarchy-hw-laptop-closed
+auth      sufficient pam_fprintd.so
+auth		include		system-auth
+account		include		system-auth
+session		include		system-auth
+session		optional	pam_systemd.so class=none
 ```
+
+The two fingerprint lines are inserted after the `#%PAM-1.0` header, directly above the first `auth`
+line. Apart from those two lines the file is byte-for-byte Arch's stock `sudo` — `setup` checks this
+and restores the backup if anything else changed.
 
 #### Operational Workflow
 * **Lid Open (Normal):**
-  * Tapping the sensor satisfies `sufficient` and immediately authorizes `sudo`.
-  * Pressing <kbd>Enter</kbd> (or timing out) fails `pam_fprintd.so` gracefully and falls through to `include system-auth` for your password prompt.
+  * Touching the sensor satisfies `sufficient` and authorizes `sudo` immediately.
+  * <kbd>Ctrl</kbd>+<kbd>C</kbd> at the fingerprint prompt (or a timeout) falls through to
+    `include system-auth` for the password prompt.
 * **Lid Closed (Clamshell Mode):**
-  * `/usr/bin/omarchy-hw-laptop-closed` exits with `0` (success).
-  * PAM executes `[success=1]`, skipping the next line (`pam_fprintd.so`).
-  * PAM drops straight to the standard password prompt without any delay or sensor timeout.
-* **Non-Interactive Execution (`sudo -n`):**
-  * Scripts running `sudo -n true` properly receive `sudo: a password is required` immediately without hanging on the fingerprint sensor.
+  * `omarchy-hw-laptop-closed` exits `0`, so `[success=1]` skips `pam_fprintd.so`.
+  * PAM goes straight to the password prompt with no sensor wait.
+* **Non-Interactive (`sudo -n`):**
+  * Scripts get `sudo: a password is required` immediately instead of hanging on the sensor.
 
 ---
 
-### C. Lockscreen Auth & The 250ms Livelock Workaround
+### C. Lockscreen Auth & The 250ms Re-Arm Loop
 
 #### Configuration (`/etc/pam.d/omarchy-lock-fingerprint`)
 ```pam
@@ -140,16 +157,16 @@ auth       required                    pam_fprintd.so timeout=-1 max-tries=-1
 account    include                     system-local-login
 ```
 
-#### Why `timeout=-1 max-tries=-1` is Crucial
-1. **Quickshell Architecture:** In [`/usr/share/omarchy/shell/plugins/lock/Service.qml`](file:///usr/share/omarchy/shell/plugins/lock/Service.qml), the lockscreen runs two PAM contexts in parallel:
-   * `passwordPam` (`omarchy-lock-password`)
-   * `fingerprintPam` (`omarchy-lock-fingerprint`)
-2. **The Upstream Bug (Issue #9905):** In upstream Omarchy, when `fingerprintPam` experiences an error or hits the default 30-second `fprintd` timeout, an internal timer (`fingerprintRetryTimer`) immediately restarts the PAM session after **250 ms**:
+The password path runs in parallel through Omarchy's untouched `/etc/pam.d/omarchy-lock-password`
+(`pam_faillock` + `pam_unix`).
+
+#### Why Two Fixes Are Needed
+1. **Quickshell Architecture:** Omarchy's lock plugin (`/usr/share/omarchy/shell/plugins/lock/Service.qml`)
+   runs two PAM contexts in parallel: `passwordPam` (`omarchy-lock-password`) and
+   `fingerprintPam` (`omarchy-lock-fingerprint`).
+2. **The Upstream Behavior:** whenever `fingerprintPam` errors out (including fprintd's default
+   30-second timeout), `fingerprintRetryTimer` restarts it after **250 ms**:
    ```qml
-   onError: function(error) {
-     root.fingerprintAuthenticating = false
-     if (root.lockRequested && root.fingerprintConfigured) fingerprintRetryTimer.restart()
-   }
    Timer {
      id: fingerprintRetryTimer
      interval: 250
@@ -157,16 +174,29 @@ account    include                     system-local-login
      onTriggered: root.startFingerprint()
    }
    ```
-3. **Driver Impact:** On EgisTec Match-on-Chip sensors (`libfprint-egismoc-sdcp`), this rapid re-arming causes an internal driver assertion crash in `libfprint`.
-4. **The Solution in Dotfiles:** Adding `timeout=-1 max-tries=-1` instructs `pam_fprintd` to keep the reader active continuously for as long as the lockscreen is active. The sensor never times out, completely preventing the 250ms re-arming loop.
+3. **Driver Impact:** the EgisTec sensor needs ~1.5 s to reset its USB state machine. Re-arming
+   after 250 ms trips an assertion in the SDCP driver (`task_ssm == NULL`) and loops.
+4. **Fix 1 — no timeout:** `timeout=-1 max-tries=-1` keeps the reader armed for as long as the
+   screen is locked, so the 30-second timeout never fires.
+5. **Fix 2 — slower retry:** any other error still goes through the retry timer, so
+   `egismoc-fingerprint` clones the stock plugin (`omarchy plugin clone omarchy.lock` → `arun.lock`)
+   and raises its interval to **1500 ms**. Live check:
+   ```text
+   /usr/share/omarchy/shell/plugins/lock/Service.qml     interval: 250
+   ~/.config/omarchy/plugins/arun.lock/Service.qml        interval: 1500
+   ```
+   The clone doesn't get Omarchy's lock-screen updates by itself, so after every update and at boot
+   `egismoc-fingerprint check` compares it with the stock plugin and rebuilds it if Omarchy changed it
+   (never while the session is locked).
 
-#### Journalctl Log Verification
+#### Journal Verification (this boot)
 ```text
-omarchy-shell[26164]: quickshell.service.pam.subprocess: Starting pam session for user "arun" with config "omarchy-lock-fingerprint" in dir "/etc/pam.d"
-omarchy-shell[26164]: quickshell.service.pam.subprocess: Relaying pam message: "Place your right index finger on the fingerprint reader" echo: 1 error: 0 responseRequired: 0
-omarchy-shell[26164]: quickshell.service.pam.subprocess: Authenticated successfully.
+omarchy-shell[21216]: quickshell.service.pam.subprocess: Starting pam session for user "arun" with config "omarchy-lock-fingerprint" in dir "/etc/pam.d"
+omarchy-shell[21216]: quickshell.service.pam.subprocess: Relaying pam message: "Place your right index finger on the fingerprint reader" echo: 1 error: 0 responseRequired: 0
+omarchy-shell[21216]: quickshell.service.pam.subprocess: Authenticated successfully.
 ```
-* Result: Authentication succeeded cleanly in approximately 1 second upon touching the sensor.
+* Unlocked by finger twice this boot (11:31:56 and 11:34:25), about 1 second after the prompt each time.
+* No errors or assertions in `journalctl -u fprintd -b`.
 
 ---
 
@@ -174,15 +204,22 @@ omarchy-shell[26164]: quickshell.service.pam.subprocess: Authenticated successfu
 
 #### Configuration
 ```pam
-auth      [success=1 default=ignore] pam_exec.so quiet /usr/bin/omarchy-hw-laptop-closed
-auth      sufficient pam_fprintd.so
-auth      required pam_unix.so
+#%PAM-1.0
 
-account   required pam_unix.so
-password  required pam_unix.so
-session   required pam_unix.so
+auth      [success=1 default=ignore] pam_exec.so quiet quiet_log /usr/bin/omarchy-hw-laptop-closed
+auth      sufficient pam_fprintd.so
+auth       include      system-auth
+account    include      system-auth
+password   include      system-auth
+session    include      system-auth
 ```
-* **Comparison with Arch Default (`/usr/lib/pam.d/polkit-1`):** Arch Linux defaults to `include system-auth`. The dotfiles install script mirrors upstream Omarchy's template (`/usr/bin/omarchy-setup-security-fingerprint`). While raw `pam_unix.so` works for authentication, `system-auth` provides additional protections like `pam_faillock` (brute-force account lockouts).
+
+* On a fresh install `/etc/pam.d/polkit-1` doesn't exist; polkit uses the vendor copy in
+  `/usr/lib/pam.d/polkit-1`. Once a file exists in `/etc/pam.d/`, Linux-PAM ignores the vendor copy,
+  so `egismoc-fingerprint` starts from the vendor copy and adds only the two fingerprint lines.
+* **Difference from upstream Omarchy:** Omarchy's `omarchy setup security fingerprint` writes a
+  `pam_unix.so`-only polkit stack. Going through `system-auth` instead keeps Arch's
+  `pam_faillock` (brute-force lockout) and any other `system-auth` policy on admin prompts.
 
 ---
 
@@ -190,51 +227,53 @@ session   required pam_unix.so
 
 | Feature | Upstream Omarchy | Quattro Dotfiles Implementation | Status |
 | :--- | :--- | :--- | :--- |
-| **Driver Package** | Stock `libfprint-git` | `libfprint-egismoc-sdcp-git` | **Required** for EgisTec MOC (`1c7a:0584`) |
-| **Driver Pinning** | None (overwritten on updates) | `IgnorePkg` in `/etc/pacman.conf` + update hooks | **Safeguarded** against system upgrades |
-| **Clamshell Gate** | `/usr/bin/omarchy-hw-laptop-closed` | Same (`/usr/bin/omarchy-hw-laptop-closed`) | **Working** as designed |
-| **Lock Screen PAM** | `auth required pam_fprintd.so` | `pam_fprintd.so timeout=-1 max-tries=-1` | **Fixed** (prevents Issue #9905 crash loop) |
-| **Sudo Fallback** | `auth sufficient pam_fprintd.so` | Same | **Working** (press Enter or timeout for password) |
+| **Driver Package** | `libfprint-git` (no egismoc SDCP) | `libfprint-egismoc-sdcp-git`, pinned PKGBUILD + checksum-verified binary | **Required** for EgisTec MOC (`1c7a:0584`) |
+| **Driver Pinning** | None | `IgnorePkg` in `/etc/pacman.conf`, kept by the `pre-refresh-pacman` and `post-update` hooks | **Safeguarded** against upgrades |
+| **Setup Entry Point** | *Setup › Security › Fingerprint* → `omarchy-setup-security-fingerprint` | Same menu entry, overridden to run `egismoc-fingerprint setup` | **Rerouted** (stock wizard would reinstall `libfprint-git`) |
+| **Clamshell Gate** | `pam_exec.so quiet omarchy-hw-laptop-closed` | Same, plus `quiet_log` | **Working**, no log noise |
+| **Sudo Fallback** | `auth sufficient pam_fprintd.so` | Same | **Working** (Ctrl+C or timeout → password) |
+| **Polkit Stack** | `pam_unix.so` only | Vendor copy (`system-auth`) + fingerprint lines | **Keeps** `pam_faillock` |
+| **Lock Screen PAM** | `auth required pam_fprintd.so` | `pam_fprintd.so timeout=-1 max-tries=-1` | **Fixed** (no 30s timeout re-arm) |
+| **Lock Screen Plugin** | `omarchy.lock`, 250 ms retry | `arun.lock` clone, 1500 ms retry, auto-rebuilt after Omarchy updates | **Fixed** (no driver assertion loop) |
 
 ---
 
 ## 5. Diagnostic Runbook (Read-Only Commands)
 
-Use these commands anytime to verify system and authentication health:
-
 ### Fingerprint & Hardware Check
 ```bash
-# Check USB device enumeration
+# Everything the fingerprint setup manages, one line each
+egismoc-fingerprint status
+
+# USB enumeration
 lsusb | grep -i "1c7a:0584"
 
-# Check enrolled fingerprints
+# Enrolled fingerprints
 fprintd-list "$USER"
 
-# Check daemon service status
-systemctl status fprintd
+# Driver pin
+grep -E '^(HoldPkg|IgnorePkg)' /etc/pacman.conf
 ```
 
 ### Authentication Logs Audit
 ```bash
-# Inspect fprintd logs since last boot
+# fprintd logs since boot
 journalctl -u fprintd -b --no-pager
 
-# Check lock screen PAM events
-journalctl -b --no-pager | grep -i "omarchy-lock-fingerprint"
+# Lock-screen PAM sessions and results
+journalctl -b --no-pager | grep -E 'omarchy-lock-fingerprint|pam.subprocess: Authenticated'
 
-# Search for any PAM or sudo auth failures
+# Lid-gate noise (should be 0 with quiet_log)
+journalctl -b --no-pager | grep -c 'omarchy-hw-laptop-closed failed'
+
+# Any PAM or sudo auth failures
 journalctl -b --no-pager | grep -iE "pam_unix\(.*:auth\)|pam_exec"
 ```
 
 ### System Health Quick Check
 ```bash
-# Verify no failed services exist
 systemctl --failed
 systemctl --user --failed
-
-# Check for compositor errors
 hyprctl configerrors
-
-# Check for core dumps or application crashes
 coredumpctl list
 ```

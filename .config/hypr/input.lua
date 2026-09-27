@@ -55,3 +55,19 @@ hl.gesture({ fingers = 3, direction = "horizontal", action = "workspace" })
 -- Enable touchpad gestures for moving focus (helpful on scrolling layout).
 -- hl.gesture({ fingers = 3, direction = "left", action = function() hl.dispatch(hl.dsp.focus({ direction = "l" })) end })
 -- hl.gesture({ fingers = 3, direction = "right", action = function() hl.dispatch(hl.dsp.focus({ direction = "r" })) end })
+--
+hl.gesture({
+  fingers = 3,
+  direction = "up",
+  action = function()
+    hl.dispatch(hl.dsp.exec_cmd("omarchy-shell shell summon mirador '{\"cycleUI\":\"full\",\"keybindMode\":\"normal\"}'"))
+  end,
+})
+
+hl.gesture({
+  fingers = 3,
+  direction = "down",
+  action = function()
+    hl.dispatch(hl.dsp.exec_cmd("omarchy-shell shell hide mirador"))
+  end,
+})

@@ -32,12 +32,14 @@ Personal Hyprland / Omarchy Quattro configuration and installer, structured for 
 
 | Component | Path | Highlights |
 |---|---|---|
-| Hyprland | `.config/hypr/` | Custom keybindings (`bindings.lua`), window rules for Android Emulator / QEMU (`hyprland.lua`), keyboard/touchpad/gesture settings (`input.lua`) |
+| Hyprland | `.config/hypr/` | Custom keybindings (`bindings.lua`), window rules for Android Emulator / QEMU (`hyprland.lua`), keyboard/touchpad/gesture settings (`input.lua`), blur scoped to the Mirador overview (`looknfeel.lua`) |
 | Omarchy Shell | `.config/omarchy/` | Bar/widget layout (`shell.json`), menu extensions (`omarchy-menu.jsonc`), hooks |
 | Audio (WirePlumber) | `.config/wireplumber/`, `.local/share/wireplumber/` | Sink priority rules, headphone/speaker autoswitcher (`sof-autoswitch.lua`) |
 | Shell & tools | various | Ghostty (zsh, font size), git identity and `gh` credentials, `.bashrc` / `.zshrc` |
 
 Only files that differ from Omarchy's own defaults are tracked. Everything else stays Omarchy's, so its updates keep reaching you. To start customizing another file, copy it from `~/.config` into the same path here.
+
+Not installed by `install.sh` (add them yourself on a new machine): the community bar widgets that `shell.json` places — `agx.screen-time`, `crmne.hyprmoncfg`, `harshith.system-monitor`, `ssupt.bluetooth-audio` (*Setup › Plugins › Add*); the [Mirador](https://github.com/sanjyay/Mirador) overview (`omarchy plugin add https://github.com/sanjyay/Mirador.git`), which the keybindings and gestures below call; and `omazed`, which the `theme-set` hook calls. `hyprmoncfg` itself is offered in Step 4.
 
 ## Keybindings
 
@@ -47,6 +49,9 @@ Only files that differ from Omarchy's own defaults are tracked. Everything else 
 | `F8` / `SUPER + L` | Lock screen (`omarchy-system-lock`) |
 | `ALT + SPACE` | Application launcher |
 | `SUPER + SHIFT + S` | Screen capture |
+| `SUPER + TAB` / `SUPER + SHIFT + TAB` | Mirador workspace carousel (hold Super, release to switch); replaces next/previous workspace |
+| `SUPER + GRAVE` | Mirador full overview |
+| 3-finger swipe up / down | Open / close the Mirador overview (3-finger sideways still switches workspace) |
 
 ## Audio Priority Rules
 
@@ -65,9 +70,14 @@ Only files that differ from Omarchy's own defaults are tracked. Everything else 
 ### 1. Clone the repository
 
 ```bash
-git clone <your-repo-url> ~/dotfiles
-cd ~/dotfiles
+git clone https://github.com/dev-learner-supreme/omarchy-quattro-dotfiles ~/omarchy-quattro-dotfiles
+cd ~/omarchy-quattro-dotfiles
 ```
+
+Any folder works, but **leave the repo where you ran `install.sh`**: `~/.local/bin/egismoc-fingerprint`
+is a symlink into it, and the update/boot hooks reach the fingerprint tool through that link. If the
+repo moves, they skip silently — re-run `./install.sh` from the new location to repoint it.
+Details in [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md#the-repo-folder-must-stay-put).
 
 ### 2. Run the installer
 
@@ -90,7 +100,7 @@ It is an orchestrator: wherever Omarchy has a native command for a step, it call
 | 5 | SSH agent via systemd socket activation | — |
 | 6 | Reloads WirePlumber, Hyprland (and reports `hyprctl configerrors`), terminals, and the Omarchy shell | `omarchy restart terminal`, `omarchy restart shell` |
 
-Dotfiles deploy *before* the fingerprint step on purpose: the tracked `shell.json` has an empty `plugins[]`, so deploying it after enabling the cloned lock screen would switch it back off.
+`shell.json` is special: its `plugins`, `disabledPlugins` and `cloneSourceRestores` keys record which plugins are switched on *on that machine* (the cloned lock screen, Mirador, …), so the repo leaves them out and every deploy keeps the machine's own values. Only the bar layout and idle settings are shared. This matters for safety too: the laptop's `disabledPlugins` switches off Omarchy's stock lock screen in favor of the fingerprint clone, which would leave a machine without that clone with no lock screen at all.
 
 ## Fingerprint (EgisTec Match-on-Chip)
 
@@ -127,8 +137,11 @@ Omarchy's own updates edit some of these files (for example `shell.json` and `hy
 | **changed since the last deploy** | **You're asked:** keep yours, use the repo's (yours is backed up), copy yours into the repo, or show the difference. With `-y` it keeps yours and lists it at the end. |
 | deleted from the repo, unchanged here | Removed, with a backup |
 | deleted from the repo, but changed here | Kept (you're asked without `-y`), and no longer managed |
+| `shell.json` differing only in plugin state | Treated as identical; any deploy keeps this machine's plugin state (see Step 2 note above) |
 
 Files that are symlinks are left alone.
+
+On a fresh install, expect a question about `~/.config/git/config` on the first run: Omarchy's installer writes your name and email into it, so it no longer matches `/etc/skel`. Choosing *Keep mine* leaves it unmanaged (and it's asked again next run); *Use the repo's version* brings in the `gh` credential helper for GitHub.
 
 ---
 

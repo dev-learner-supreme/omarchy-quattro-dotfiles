@@ -9,7 +9,7 @@ file adds the rules specific to this repo and this hardware.
 | Path | What it is |
 |---|---|
 | `install.sh` | Orchestrator. Idempotent; safe to re-run. |
-| `bin/egismoc-fingerprint` | EgisTec fingerprint command, linked into `~/.local/bin` |
+| `bin/egismoc-fingerprint` | EgisTec fingerprint command, symlinked into `~/.local/bin` (hooks and menu use the link) |
 | `lib/ui.sh` | Shared prompt/log/sudo helpers, sourced by both scripts |
 | `lib/dotfiles.sh` | Dotfile deployment: drift check, removals, deploy state |
 | `packages/libfprint-egismoc-sdcp/PKGBUILD` | Pinned SDCP driver recipe |
@@ -22,6 +22,11 @@ Only files that **differ from Omarchy's defaults** belong in `.config/`. Don't a
 a file that's identical to Omarchy's (`/etc/skel/<path>` on the machine), and
 suggest removing one that has drifted back to stock: tracked copies override
 Omarchy's updates to that file.
+
+`shell.json` tracks the layout only: `plugins`, `disabledPlugins` and `cloneSourceRestores`
+are per-machine plugin state that `lib/dotfiles.sh` ignores when comparing and preserves when
+deploying. Keep them out of the repo copy (`"plugins": []`), and never commit a
+`disabledPlugins` that turns off `omarchy.lock`.
 
 Edit files **here**, then run `./install.sh` to deploy. If a file in `~/.config`
 changed since the last deploy (a hand edit, an Omarchy migration, an app),
@@ -44,6 +49,10 @@ changed since the last deploy (a hand edit, an Omarchy migration, an app),
   from stock (other than the retry delay) marks it stale. Change the lock
   screen through `bin/egismoc-fingerprint` instead.
 - **Never modify `/usr/share/omarchy/`** — read it to learn how commands work.
+- **The repo's location is load-bearing.** `~/.local/bin/egismoc-fingerprint` links into it, and
+  the hooks skip silently if the link dangles. Don't move, rename or delete the checkout; if the
+  user does, they must re-run `./install.sh` from the new path. Anything committed under `bin/`
+  or `lib/` goes live at the next hook run, without `install.sh`.
 - Don't run `install.sh` or `egismoc-fingerprint setup` yourself: they need the
   user at a terminal (sudo, and a finger on the sensor). Ask the user to run them.
   Read-only checks are fine: `egismoc-fingerprint status`.

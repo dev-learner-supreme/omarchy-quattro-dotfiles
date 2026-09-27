@@ -309,6 +309,63 @@ test_dotfiles_symlink_left_alone() {
   check "target untouched" has "$DT/elsewhere" 'elsewhere'
 }
 
+# shell.json: the repo tracks the layout; plugin state stays per machine.
+shell_json_env() {
+  dotfiles_env
+  mkdir -p "$DT"/{repo,home,skel}/.config/omarchy
+  echo '{"version":1,"bar":{"position":"top"},"plugins":[]}' > "$DT/repo/.config/omarchy/shell.json"
+  echo '{"version":1,"bar":{"position":"top"},"plugins":[{"id":"arun.lock"},{"id":"mirador"}],"disabledPlugins":["omarchy.lock"],"cloneSourceRestores":["arun.lock"]}' \
+    > "$DT/home/.config/omarchy/shell.json"
+}
+SHELL_JSON() { echo "$DT/$1/.config/omarchy/shell.json"; }
+
+test_dotfiles_shell_json_plugin_state_is_not_drift() {
+  shell_json_env
+  deploy > "$DT/log" 2>&1
+  check "same layout counts as identical" lacks "$DT/log" 'changed on this machine|Replaced|Updated'
+  check "plugins untouched" has "$(SHELL_JSON home)" 'mirador'
+}
+
+test_dotfiles_shell_json_update_keeps_plugin_state() {
+  shell_json_env
+  deploy > /dev/null 2>&1
+  echo '{"version":1,"bar":{"position":"bottom"},"plugins":[]}' > "$(SHELL_JSON repo)"
+  deploy > "$DT/log" 2>&1
+  check "layout updated" test "$(jq -r .bar.position "$(SHELL_JSON home)")" = bottom
+  check "enabled plugins kept" test "$(jq -c '[.plugins[].id]' "$(SHELL_JSON home)")" = '["arun.lock","mirador"]'
+  check "stock lock stays disabled" test "$(jq -c .disabledPlugins "$(SHELL_JSON home)")" = '["omarchy.lock"]'
+  check "clone restore kept" test "$(jq -c .cloneSourceRestores "$(SHELL_JSON home)")" = '["arun.lock"]'
+}
+
+test_dotfiles_shell_json_default_replaced_keeps_plugin_state() {
+  shell_json_env
+  echo '{"version":1,"bar":{"position":"left"},"plugins":[]}' > "$(SHELL_JSON skel)"
+  jq '.bar.position = "left"' "$(SHELL_JSON home)" > "$DT/tmp" && mv "$DT/tmp" "$(SHELL_JSON home)"
+  deploy > "$DT/log" 2>&1
+  check "treated as Omarchy's default" has "$DT/log" "Replaced Omarchy's default"
+  check "repo layout" test "$(jq -r .bar.position "$(SHELL_JSON home)")" = top
+  check "plugins kept" has "$(SHELL_JSON home)" 'mirador'
+}
+
+test_dotfiles_shell_json_copied_into_repo_without_plugin_state() {
+  shell_json_env
+  deploy > /dev/null 2>&1
+  jq '.bar.position = "right"' "$(SHELL_JSON home)" > "$DT/tmp" && mv "$DT/tmp" "$(SHELL_JSON home)"
+  printf 'i\n' | deploy_tty > "$DT/log" 2>&1
+  check "layout copied" test "$(jq -r .bar.position "$(SHELL_JSON repo)")" = right
+  check "no machine plugins in the repo" test "$(jq -c .plugins "$(SHELL_JSON repo)")" = '[]'
+  check "no disabledPlugins in the repo" lacks "$(SHELL_JSON repo)" 'disabledPlugins|cloneSourceRestores'
+  deploy > "$DT/log2" 2>&1
+  check "no more questions" lacks "$DT/log2" 'changed on this machine'
+}
+
+test_dotfiles_fresh_shell_json_gets_no_disabled_lock() {
+  shell_json_env
+  rm "$(SHELL_JSON home)"
+  deploy > /dev/null 2>&1
+  check "stock lock screen left enabled" lacks "$(SHELL_JSON home)" 'disabledPlugins'
+}
+
 # ------------------------------------------------------------------------------
 
 filter="${1:-}"

@@ -17,7 +17,28 @@ OMARCHY_SKEL="${OMARCHY_SKEL:-/etc/skel}"
 declare -A DEPLOYED=()   # path -> sha256 of the content this script last wrote
 DOTFILES_KEPT=()
 
-file_hash() { sha256sum "$1" | cut -d' ' -f1; }
+# shell.json mixes the bar layout with per-machine plugin state: which plugins
+# are switched on (they're installed per machine, not from this repo), and
+# disabledPlugins, which can switch off Omarchy's own lock screen. The repo
+# tracks only the layout; every comparison ignores these keys, and a deploy
+# keeps the machine's own values for them.
+MACHINE_STATE_FILE=".config/omarchy/shell.json"
+MACHINE_STATE_KEYS='["plugins","disabledPlugins","cloneSourceRestores"]'
+
+has_machine_state() { [[ "$1" == "$MACHINE_STATE_FILE" ]]; }
+
+# The part of FILE the repo manages. Invalid JSON is compared as-is.
+managed_content() {
+  local rel="$1" file="$2"
+  if has_machine_state "$rel" &&
+     jq -S --argjson k "$MACHINE_STATE_KEYS" 'with_entries(select(.key as $x | $k | index($x) | not))' "$file" 2>/dev/null; then
+    return 0
+  fi
+  cat "$file"
+}
+
+same_content() { cmp -s <(managed_content "$1" "$2") <(managed_content "$1" "$3"); }
+content_hash() { managed_content "$1" "$2" | sha256sum | cut -d' ' -f1; }
 
 managed_paths() {
   (
@@ -55,9 +76,32 @@ backup_home_file() {
 }
 
 install_from_repo() {
-  mkdir -p "$(dirname "$HOME/$1")"
-  cp -p "$DOTFILES_DIR/$1" "$HOME/$1"
-  DEPLOYED["$1"]="$(file_hash "$DOTFILES_DIR/$1")"
+  local rel="$1" src="$DOTFILES_DIR/$1" dest="$HOME/$1" merged=""
+  mkdir -p "$(dirname "$dest")"
+  if has_machine_state "$rel" && [[ -f "$dest" ]]; then
+    merged="$(jq --slurpfile live "$dest" --argjson k "$MACHINE_STATE_KEYS" \
+      '. + ($live[0] | with_entries(select(.key as $x | $k | index($x))))' "$src" 2>/dev/null || true)"
+  fi
+  if [[ -n "$merged" ]]; then
+    printf '%s\n' "$merged" > "$dest"   # repo layout, this machine's plugin state
+  else
+    cp -p "$src" "$dest"
+  fi
+  DEPLOYED["$rel"]="$(content_hash "$rel" "$src")"
+}
+
+# Copies ~/REL into the repo, minus any per-machine state.
+copy_into_repo() {
+  local rel="$1" stripped=""
+  if has_machine_state "$rel"; then
+    stripped="$(jq --argjson k "$MACHINE_STATE_KEYS" \
+      'with_entries(select(.key as $x | $k | index($x) | not)) | .plugins = []' "$HOME/$rel" 2>/dev/null || true)"
+  fi
+  if [[ -n "$stripped" ]]; then
+    printf '%s\n' "$stripped" > "$DOTFILES_DIR/$rel"
+  else
+    cp -p "$HOME/$rel" "$DOTFILES_DIR/$rel"
+  fi
 }
 
 # Prints keep, repo, or pull. Unattended runs always keep the local file.
@@ -80,7 +124,7 @@ ask_about_drift() {
       "copy mine into the repo"|i*) echo pull; return 0 ;;
       "show the difference"|d*)
         diff -u --label "repo: $rel" --label "this machine: ~/$rel" \
-          "$DOTFILES_DIR/$rel" "$HOME/$rel" >&2 || true ;;
+          <(managed_content "$rel" "$DOTFILES_DIR/$rel") <(managed_content "$rel" "$HOME/$rel") >&2 || true ;;
       *) echo keep; return 0 ;;
     esac
   done
@@ -98,12 +142,12 @@ deploy_one() {
     info "Added: ~/$rel"
     return 0
   fi
-  if cmp -s "$src" "$dest"; then
-    DEPLOYED["$rel"]="$(file_hash "$src")"
+  if same_content "$rel" "$src" "$dest"; then
+    DEPLOYED["$rel"]="$(content_hash "$rel" "$src")"
     return 0
   fi
 
-  current="$(file_hash "$dest")"
+  current="$(content_hash "$rel" "$dest")"
   # Still exactly what this script put there last time: the repo moved on.
   if [[ "${DEPLOYED[$rel]:-}" == "$current" ]]; then
     install_from_repo "$rel"
@@ -111,7 +155,7 @@ deploy_one() {
     return 0
   fi
   # An Omarchy default nobody has touched: replacing it is the whole point.
-  if [[ -f "$OMARCHY_SKEL/$rel" ]] && cmp -s "$OMARCHY_SKEL/$rel" "$dest"; then
+  if [[ -f "$OMARCHY_SKEL/$rel" ]] && same_content "$rel" "$OMARCHY_SKEL/$rel" "$dest"; then
     backup_home_file "$rel"
     install_from_repo "$rel"
     info "Replaced Omarchy's default: ~/$rel"
@@ -126,7 +170,7 @@ deploy_one() {
       info "Replaced with the repo's version; yours is saved in $BACKUP_DIR/$rel"
       ;;
     pull)
-      cp -p "$dest" "$src"
+      copy_into_repo "$rel"
       DEPLOYED["$rel"]="$current"
       info "Copied into the repo — review and commit it: git -C \"$DOTFILES_DIR\" diff -- $rel"
       ;;
@@ -146,7 +190,7 @@ prune_removed() {
     [[ -n "${managed[$rel]:-}" ]] && continue
     dest="$HOME/$rel"
     if [[ -f "$dest" && ! -L "$dest" ]]; then
-      if [[ "$(file_hash "$dest")" == "${DEPLOYED[$rel]}" ]]; then
+      if [[ "$(content_hash "$rel" "$dest")" == "${DEPLOYED[$rel]}" ]]; then
         backup_home_file "$rel"
         rm -f "$dest"
         info "Removed (deleted from the repo): ~/$rel"

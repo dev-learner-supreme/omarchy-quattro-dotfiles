@@ -8,10 +8,13 @@ packages, and recovery workflows.
 ## Quick Start
 
 ```bash
-cd ~/DistroScripts/omarchy-quattro-dotfiles
+cd ~/omarchy-quattro-dotfiles
 ./install.sh        # Interactive (prompts for AUR/optional steps)
-./install.sh -y     # Unattended (accepts all defaults)
+./install.sh -y     # Unattended (each prompt takes its default)
 ```
+
+Run it from wherever the repo lives, and leave the repo there afterwards — see
+[The repo folder must stay put](#the-repo-folder-must-stay-put).
 
 ---
 
@@ -24,7 +27,7 @@ graph TD
   D["Authentication Layer"] --> E["PAM: sudo + polkit + lock screen<br/>auth sufficient pam_fprintd.so<br/>+ clamshell gate"]
   D --> F["SSH Agent<br/>systemd ssh-agent.socket<br/>AddKeysToAgent yes"]
   G["Desktop Layer"] --> H["Hyprland Lua DSL<br/>F7 hyprmoncfg · F8 lock<br/>Super+Shift+S screenshot"]
-  G --> I["Omarchy Shell Plugins<br/>screen-time · hyprmoncfg · bluetooth-audio"]
+  G --> I["Omarchy Shell Plugins<br/>arun.lock (fingerprint retry clone)<br/>bar add-ons: screen-time · hyprmoncfg · bluetooth-audio"]
   G --> J["Terminals<br/>Ghostty (zsh) · Foot · Alacritty · Kitty"]
   G --> K["WirePlumber<br/>Audio priority rules<br/>SOF jack autoswitcher"]
 ```
@@ -44,8 +47,10 @@ graph TD
 | Package | Purpose |
 | :--- | :--- |
 | `zsh-autosuggestions` | Fish-like command suggestions for Zsh |
-| `fprintd` | D-Bus daemon for fingerprint reader management |
 | `usbutils` | Hardware discovery (`lsusb`) |
+| `restic` | Backup engine behind Omarchy Time Machine |
+| `rclone` | Cloud backends for backups (Google Drive, B2, S3) |
+| `fprintd` | Fingerprint daemon — installed by `egismoc-fingerprint setup`, not Step 1 |
 | `ghostty` | GPU-accelerated terminal (pre-installed on Omarchy) |
 | `foot` | Lightweight Wayland terminal fallback (pre-installed) |
 | `btop` | Resource monitor (pre-installed) |
@@ -55,7 +60,7 @@ graph TD
 
 | Package | Purpose | Install Notes |
 | :--- | :--- | :--- |
-| **`hyprmoncfg`** | Multi-monitor TUI & daemon | Required for <kbd>F7</kbd> display toggle |
+| **`hyprmoncfg`** | Multi-monitor TUI & daemon | Required for <kbd>F7</kbd> display toggle and its bar widget |
 | **`brave-origin-bin`** | Minimalist Brave browser | Installed via `omarchy install browser brave-origin` |
 
 ---
@@ -82,7 +87,7 @@ overridden to run. On any other sensor it hands off to Omarchy's wizard.
    [pinned PKGBUILD](packages/libfprint-egismoc-sdcp/) (TenSeventy7's SDCP
    fork at commit `4d128d4`) — not from the AUR. The archived binary is
    preferred, and installed only if its sha256 matches `packages/.sha256sums`.
-2. **Update Lock**: [`/etc/pacman.conf`](file:///etc/pacman.conf) —
+2. **Update Lock**: `/etc/pacman.conf` —
    `IgnorePkg = libfprint libfprint-egismoc-sdcp-git`.
    Prevents `omarchy update`, `pacman -Syu`, and `yay -Sua` from overwriting.
 3. **Offline Archive**: Pre-compiled `.pkg.tar.zst` in `packages/`,
@@ -108,6 +113,13 @@ Check every piece at once with `egismoc-fingerprint status`.
 > **Password fallback is always available.** If the sensor fails, times out,
 > or the lid is shut, PAM drops straight to the password prompt.
 
+### Shell Plugins Not Installed by `install.sh`
+
+`shell.json` places three community bar widgets — `agx.screen-time`, `crmne.hyprmoncfg`,
+`ssupt.bluetooth-audio` — that `install.sh` doesn't install. On a fresh machine their slots stay
+empty until you add them via *Setup › Plugins › Add* (and install `hyprmoncfg` for its widget).
+The same goes for `omazed`, which the `theme-set` hook calls on every theme change.
+
 ### Recovery
 ```bash
 # Reinstall from the archived binary (verify it first — must match packages/.sha256sums)
@@ -130,9 +142,9 @@ Uses OpenSSH's built-in systemd socket activation — no third-party wrappers.
 | Component | File | Purpose |
 | :--- | :--- | :--- |
 | **Daemon** | `systemctl --user enable --now ssh-agent.socket` | Socket-activated agent at `/run/user/1000/ssh-agent.socket` |
-| **Session Env** | [`~/.config/environment.d/ssh-agent.conf`](file:///home/arun/.config/environment.d/ssh-agent.conf) | Systemd, uwsm, Hyprland, and GUI apps inherit `SSH_AUTH_SOCK` |
-| **Shell Env** | [`~/.bashrc`](file:///home/arun/.bashrc) + [`~/.zshrc`](file:///home/arun/.zshrc) | `export SSH_AUTH_SOCK=...` for all terminal sessions |
-| **Auto-Load** | [`~/.ssh/config`](file:///home/arun/.ssh/config) | `AddKeysToAgent yes` — passphrase once per login session |
+| **Session Env** | `~/.config/environment.d/ssh-agent.conf` | Systemd, uwsm, Hyprland, and GUI apps inherit `SSH_AUTH_SOCK` |
+| **Shell Env** | `~/.bashrc` + `~/.zshrc` | `export SSH_AUTH_SOCK=...` for all terminal sessions |
+| **Auto-Load** | `~/.ssh/config` | `AddKeysToAgent yes` — passphrase once per login session |
 
 ### How It Works
 1. First `git push` or `ssh` command → prompted for passphrase **once**.
@@ -144,7 +156,35 @@ Uses OpenSSH's built-in systemd socket activation — no third-party wrappers.
 
 ## Dotfiles Repository
 
-Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroScripts/omarchy-quattro-dotfiles)
+Location: `~/omarchy-quattro-dotfiles` (any path works — see below).
+
+### The repo folder must stay put
+
+`install.sh` doesn't copy `egismoc-fingerprint`; it symlinks
+`~/.local/bin/egismoc-fingerprint` → `<repo>/bin/egismoc-fingerprint`, because the command needs
+`lib/ui.sh`, the pinned PKGBUILD, the archived driver and `.sha256sums` from the repo. So the
+repo path is baked into that one link. What depends on it:
+
+| Consumer | How it reaches the command | If the repo is moved or deleted |
+| :--- | :--- | :--- |
+| `post-boot` hook | `[[ -x ~/.local/bin/egismoc-fingerprint ]] && … check` | **Silently skipped** — the link dangles, `-x` is false |
+| `post-update` hook | Same guard, for the driver check and the lock-screen rebuild | **Silently skipped**; its IgnorePkg and PAM repairs still run (they don't need the repo) |
+| Menu *Setup › Security › Fingerprint* | `egismoc-fingerprint setup` via `PATH` (`~/.local/bin` is on the session `PATH` via Omarchy's `env-bootstrap`) | "command not found" in the floating terminal |
+| Clickable notifications | Absolute repo path, captured when the notification was sent | Clicking an old one fails |
+| You, in a terminal | `egismoc-fingerprint status` / `setup` | "command not found" |
+
+What keeps working regardless: the installed driver, the `IgnorePkg` pin, the PAM files, the
+enrolled print and the `arun.lock` clone all live outside the repo. **Fingerprint auth itself
+doesn't break.** What you lose is the maintenance: no "driver replaced" notification, and no
+lock-screen rebuild after an Omarchy update — so the clone would quietly keep running an older
+lock screen, missing any fixes Omarchy ships for it (Omarchy's clone doesn't auto-update).
+
+**If you move or re-clone the repo, run `./install.sh` from the new location** — `ln -sfn` repoints
+the link, and nothing else needs changing. Check with `readlink -f ~/.local/bin/egismoc-fingerprint`.
+
+Because it's a link, the hooks also run whatever is checked out right now: a `git pull`, a branch
+switch or an uncommitted edit in `bin/` takes effect at the next boot or update without re-running
+`install.sh`.
 
 ```
 .
@@ -155,19 +195,20 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 ├── packages/                      # Pinned driver PKGBUILD + checksum-verified binary
 ├── tests/                         # Sandbox tests (tests/run.sh), run by CI
 ├── .github/workflows/ci.yml       # ShellCheck + tests on every push
-├── CLAUDE.md (AGENTS.md)          # Guide for coding agents
+├── CLAUDE.md                      # Guide for coding agents (AGENTS.md is a symlink to it)
 ├── SETUP_AND_ARCHITECTURE.md      # This guide
-├── .bashrc                        # SSH socket + Android SDK
+├── .bashrc                        # SSH socket, ~/.local/bin on PATH, Android SDK
 ├── .zshrc                         # Starship + eza aliases + zsh plugins
 ├── .config/                       # Only files that differ from Omarchy's defaults
 │   ├── ghostty/config             # command = /usr/bin/zsh, font-size 12
 │   ├── git/config                 # Identity + gh credential helper
 │   ├── hypr/
-│   │   ├── bindings.lua           # F7, F8, Super+Shift+S, Alt+Space
+│   │   ├── bindings.lua           # F7, F8, Super+Shift+S, Alt+Space, Mirador
 │   │   ├── hyprland.lua           # Emulator/QEMU window rules
-│   │   └── input.lua              # Key repeat, touchpad, gestures
+│   │   ├── input.lua              # Key repeat, touchpad, gestures (incl. Mirador swipes)
+│   │   └── looknfeel.lua          # Blur engine on, scoped to the Mirador overview
 │   ├── omarchy/
-│   │   ├── shell.json             # Status bar layout & widgets
+│   │   ├── shell.json             # Bar layout & idle (plugin on/off state stays per machine)
 │   │   ├── hooks/theme-set        # Theme change automation
 │   │   ├── hooks/{pre-refresh-pacman,post-update,post-boot}.d/  # Driver pin + health check
 │   │   └── extensions/omarchy-menu.jsonc  # Routes Setup > Security > Fingerprint
@@ -177,7 +218,7 @@ Location: [`~/DistroScripts/omarchy-quattro-dotfiles`](file:///home/arun/DistroS
 ```
 
 Everything not listed (alacritty, foot, kitty, btop, lazygit, starship,
-`looknfeel.lua`, `monitors.lua`, ...) is left as Omarchy ships it, so Omarchy's
+`monitors.lua`, `autostart.lua`, ...) is left as Omarchy ships it, so Omarchy's
 updates keep reaching it. Deployment rules are in the README under
 *How dotfiles are deployed*.
 
@@ -214,10 +255,12 @@ updates keep reaching it. Deployment rules are in the README under
 | `omarchy update` replaces fingerprint driver | `IgnorePkg` in pacman.conf blocks both `libfprint` and `libfprint-egismoc-sdcp-git` |
 | Stock fingerprint wizard or a migration installs `libfprint-git` | The menu entry is overridden to `egismoc-fingerprint`; if the driver is replaced anyway, the `post-update`/`post-boot` hooks raise a clickable reinstall notification (`IgnorePkg` can't block an explicit `pacman -S`) |
 | `omarchy refresh pacman` wipes pacman.conf | Native `pre-refresh-pacman.d` hook automatically re-locks `IgnorePkg` before `pacman -Syyuu` runs |
-| `omarchy update` overwrites dotfiles | All configs live in `~/.config/` — Omarchy never touches user configs |
+| `omarchy update` migrations edit dotfiles | `install.sh` tracks what it last deployed and asks before replacing any file changed since (README: *How dotfiles are deployed*) |
 | Driver source disappears or changes upstream | Build is pinned to one commit, and a checksum-verified binary is archived in `packages/`, `~/.local/share/packages/` and `/var/cache/pacman/pkg/` |
 | Sensor fails / locked out | PAM uses `sufficient` — password fallback always works |
 | Docked with lid closed | Clamshell gate skips fingerprint, goes straight to password |
+| Omarchy updates its lock screen | `post-update`/`post-boot` rebuild the `arun.lock` clone from the new stock plugin and re-apply the 1500ms retry |
+| Repo folder moved or deleted | Not detected — the hooks skip silently. Re-run `./install.sh` from the new location |
 
 ---
 

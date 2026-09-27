@@ -115,6 +115,17 @@ echo "omarchy-plugin-clone $*" >> "$SB/state/calls"'
   sb_stub omarchy-notification-send 'printf "notify:" >> "$SB/state/calls"; printf " [%s]" "$@" >> "$SB/state/calls"; echo >> "$SB/state/calls"'
   sb_stub omarchy-setup-security-fingerprint 'echo "omarchy-setup-security-fingerprint" >> "$SB/state/calls"'
   sb_stub curl 'exit 1'
+  # Stands in for a real gum (installed on Omarchy), which reads the terminal
+  # directly and would hang on piped answers. Echoes the typed answer, which
+  # the scripts' prompt parsing accepts just like a menu choice.
+  sb_stub gum '
+cmd="$1"; shift; default=true
+for a in "$@"; do [[ $a == --default=* ]] && default="${a#--default=}"; done
+IFS= read -r answer || answer=""
+case "$cmd" in
+  choose)  echo "$answer" ;;
+  confirm) [[ -z $answer ]] && { [[ $default == true ]]; exit; }; [[ $answer == [Yy]* ]] ;;
+esac'
 }
 
 # Runs a command as the sandbox user, with the stubs first on PATH. Extra

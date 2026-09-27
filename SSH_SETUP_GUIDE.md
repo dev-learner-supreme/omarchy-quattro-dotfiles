@@ -35,6 +35,12 @@ User Login / Session Start
 
 ## 2. Step-by-Step Setup
 
+> [!NOTE]
+> `install.sh` (Step 5) already does Steps 3–5 below: it enables `ssh-agent.socket`, writes
+> `~/.config/environment.d/ssh-agent.conf`, and appends `AddKeysToAgent yes` to `~/.ssh/config` if it
+> isn't there. The deployed `.bashrc` and `.zshrc` export `SSH_AUTH_SOCK`. You only need Steps 1–2
+> (create the key and register it), then the checks in section 3.
+
 ### Step 1: Generate an Ed25519 SSH Key Pair
 
 Modern best practice uses **Ed25519** (faster, shorter, and cryptographically superior to legacy RSA):

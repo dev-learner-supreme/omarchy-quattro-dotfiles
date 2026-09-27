@@ -45,3 +45,19 @@ o.bind("XF86Display", "hyprmoncfg", "omarchy-shell shell toggle crmne.hyprmoncfg
 hl.unbind("SUPER + L")
 o.bind("SUPER + L", "Lock screen", "omarchy-system-lock")
 
+
+-- Mirador overview plugin (omarchy plugin add https://github.com/sanjyay/Mirador.git).
+-- Calls omarchy-shell directly: the plugin's `mirador` script isn't on PATH.
+-- Super+Tab carousel (was: next/previous workspace; Super+1…0 and the
+-- 3-finger swipe still switch workspaces). Release Super to commit.
+hl.unbind("SUPER + TAB")
+hl.unbind("SUPER + SHIFT + TAB")
+o.bind("SUPER + TAB", "Workspace carousel next",
+  [[omarchy-shell shell summon mirador '{"step":1,"modifier":"super","cycleUI":"carousel","keybindMode":"cycle"}']])
+o.bind("SUPER + SHIFT + TAB", "Workspace carousel prev",
+  [[omarchy-shell shell summon mirador '{"step":-1,"modifier":"super","cycleUI":"carousel","keybindMode":"cycle"}']])
+
+-- Full overview on Super+` rather than Mirador's suggested bare Shift+Tab,
+-- which would steal back-tab from every app.
+o.bind("SUPER + GRAVE", "Workspace overview",
+  [[omarchy-shell shell toggle mirador '{"cycleUI":"full","keybindMode":"normal"}']])

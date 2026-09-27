@@ -451,7 +451,7 @@ setup_lock_plugin() {
     omarchy-plugin-clone omarchy.lock >/dev/null || { warn "Could not clone the lock screen."; return 0; }
     info "Cloned the lock screen to $LOCK_CLONE_ID (omarchy plugin clone)."
   elif omarchy_shell_up; then
-    # Deploying a tracked shell.json can drop the clone from plugins[].
+    # Re-enable in case the clone was switched off (e.g. by hand in the menu).
     omarchy-plugin-enable "$LOCK_CLONE_ID" >/dev/null 2>&1 || warn "Could not enable $LOCK_CLONE_ID."
   fi
 

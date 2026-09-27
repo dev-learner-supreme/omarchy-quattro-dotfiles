@@ -195,6 +195,95 @@ test_renamed_retry_timer_is_reported() {
 }
 
 # ------------------------------------------------------------------------------
+# Google Drive sync (bin/drive-sync)
+# ------------------------------------------------------------------------------
+
+DS() { echo "$SB/repo/bin/drive-sync"; }
+REMOTES() { echo "$SB/state/rclone-remotes"; }
+RESYNC_MARKER() { echo "$SB/home/.local/state/drive-sync/resync-done"; }
+
+# A machine with the "gdrive" remote already configured and the baseline run.
+drive_sync_ready() {
+  sb_fresh
+  printf 'y\ny\n' | sb_run_tty "$(DS)" setup > "$SB/drive-sync-setup.log" 2>&1
+}
+
+test_drive_sync_setup_unattended_without_remote_fails_with_guidance() {
+  sb_fresh
+  sb_run env NO_RCLONE_CONFIG=1 "$(DS)" setup -y > "$SB/log" 2>&1
+  local rc=$?
+  check "exits non-zero" test "$rc" -ne 0
+  check "tells the user to run rclone config" has "$SB/log" "rclone config"
+  check "no remote created" absent "$(REMOTES)"
+  check "no baseline run" absent "$(RESYNC_MARKER)"
+}
+
+test_drive_sync_setup_interactive_creates_remote_and_baseline() {
+  drive_sync_ready
+  check "remote created" has "$(REMOTES)" '^gdrive:$'
+  check "baseline recorded" exists "$(RESYNC_MARKER)"
+  check "resync ran" has "$SB/state/calls" 'rclone bisync .*--resync'
+  check "timer enabled" has "$SB/state/calls" 'systemctl --user enable --now drive-sync.timer'
+  check "service unit written" has "$SB/home/.config/systemd/user/drive-sync.service" 'ExecStart=.*drive-sync sync'
+  check "timer unit written" has "$SB/home/.config/systemd/user/drive-sync.timer" 'OnUnitActiveSec=15min'
+  check "added to Nautilus bookmarks" has "$SB/home/.config/gtk-3.0/bookmarks" 'Google Drive'
+}
+
+test_drive_sync_setup_is_rerunnable_without_repeating_resync() {
+  drive_sync_ready
+  : > "$SB/state/calls"
+  printf 'y\ny\n' | sb_run_tty "$(DS)" setup > "$SB/log2" 2>&1
+  check "baseline not repeated" lacks "$SB/state/calls" 'rclone bisync .*--resync'
+  check "said so" has "$SB/log2" "leaving it alone"
+}
+
+test_drive_sync_sync_is_a_noop_before_setup() {
+  sb_fresh
+  sb_run "$(DS)" sync
+  check "no bisync attempted" lacks "$SB/state/calls" 'rclone bisync'
+}
+
+test_drive_sync_sync_is_a_noop_with_remote_but_no_baseline() {
+  sb_fresh
+  echo "gdrive:" > "$(REMOTES)"
+  sb_run "$(DS)" sync
+  check "no bisync attempted" lacks "$SB/state/calls" 'rclone bisync'
+}
+
+test_drive_sync_sync_runs_a_safe_recurring_bisync() {
+  drive_sync_ready
+  : > "$SB/state/calls"
+  sb_run "$(DS)" sync
+  check "recurring sync ran" has "$SB/state/calls" 'rclone bisync'
+  check "no --resync on a normal run" lacks "$SB/state/calls" 'rclone bisync .*--resync'
+  check "conflicts kept, never silently resolved" has "$SB/state/calls" 'conflict-resolve none'
+  check "safe to run unattended" has "$SB/state/calls" 'resilient'
+  check "delete safety guard set" has "$SB/state/calls" 'max-delete 10'
+}
+
+test_drive_sync_sync_failure_raises_a_notification() {
+  drive_sync_ready
+  : > "$SB/state/calls"
+  sb_run env FAIL_BISYNC=1 "$(DS)" sync > "$SB/log" 2>&1
+  local rc=$?
+  check "exits non-zero" test "$rc" -ne 0
+  check "notifies" has "$SB/state/calls" 'Google Drive sync failed'
+}
+
+test_drive_sync_status_reports_missing_pieces_on_a_fresh_machine() {
+  sb_fresh
+  sb_run "$(DS)" status > "$SB/log" 2>&1
+  check "flags the missing remote" has "$SB/log" 'no .gdrive. remote'
+  check "flags the missing baseline" has "$SB/log" 'not run yet'
+}
+
+test_drive_sync_status_reports_ok_once_set_up() {
+  drive_sync_ready
+  sb_run "$(DS)" status > "$SB/log" 2>&1
+  check "no failures reported" lacks "$SB/log" '\[!!\]'
+}
+
+# ------------------------------------------------------------------------------
 # Dotfile deployment (lib/dotfiles.sh, run directly)
 # ------------------------------------------------------------------------------
 

@@ -140,6 +140,11 @@ dotfiles_deploy
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$DOTFILES_DIR/bin/egismoc-fingerprint" "$HOME/.local/bin/egismoc-fingerprint"
 
+# drive-sync needs a Google Cloud OAuth client only you can create (see
+# GOOGLE_DRIVE_SYNC_GUIDE.md), so it's opt-in: linked here, but 'setup' is
+# never run automatically.
+ln -sfn "$DOTFILES_DIR/bin/drive-sync" "$HOME/.local/bin/drive-sync"
+
 # ---------------------------------------------------------------------------
 # Step 3 · Fingerprint
 # ---------------------------------------------------------------------------

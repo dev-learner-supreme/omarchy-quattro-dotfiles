@@ -23,6 +23,7 @@ Personal Hyprland / Omarchy Quattro configuration and installer, structured for 
 - [Tests](#tests)
 - [Safety Guards](#safety-guards)
 - [Security & Update Safety](#security--omarchy-update-safety)
+- [Google Drive Sync](#google-drive-sync)
 - [Documentation](#documentation-guides)
 - [Devices in Use](#devices-in-use)
 
@@ -120,6 +121,15 @@ It's wired into Omarchy in three places:
 
 Like Omarchy's own setup, PAM is only edited after a print is enrolled *and* verified.
 
+## Google Drive Sync
+
+`bin/drive-sync` syncs `~/GoogleDrive` with Google Drive as real local files (via `rclone bisync` on a systemd `--user` timer, not a mount), so it behaves like a normal folder — no network-dependent hangs, works offline between syncs. It's opt-in: `install.sh` links the command into `~/.local/bin`, but `drive-sync setup` is never run automatically, since it needs a Google Cloud OAuth client only you can create. See [GOOGLE_DRIVE_SYNC_GUIDE.md](GOOGLE_DRIVE_SYNC_GUIDE.md) for the exact Google Cloud Console steps and setup.
+
+```bash
+drive-sync status   # remote, folder, baseline, timer — should all say ok
+drive-sync logs     # last sync's output
+```
+
 ## Working on this repo with Claude Code
 
 [`CLAUDE.md`](CLAUDE.md) (also `AGENTS.md`) gives coding agents the repo layout and the hard rules — above all, never run the stock fingerprint wizard or install `libfprint-git` on the laptop. On Omarchy it complements the built-in `omarchy` skill that Claude Code already loads for `~/.config` work.
@@ -203,6 +213,7 @@ What *does* stay contained to your user account:
 - [SETUP_AND_ARCHITECTURE.md](SETUP_AND_ARCHITECTURE.md) — complete setup architecture, package breakdown, EgisTec fingerprint configuration, and recovery instructions
 - [SYSTEM_HEALTH_AND_AUTH_AUDIT.md](SYSTEM_HEALTH_AND_AUTH_AUDIT.md) — comprehensive system health inspection, PAM & fprintd architecture, journalctl analysis, and upstream comparison
 - [SSH_SETUP_GUIDE.md](SSH_SETUP_GUIDE.md) — native Arch & Omarchy SSH key generation, systemd user socket activation, and session auto-load guide
+- [GOOGLE_DRIVE_SYNC_GUIDE.md](GOOGLE_DRIVE_SYNC_GUIDE.md) — Google Cloud OAuth client setup and `drive-sync` usage
 
 ---
 

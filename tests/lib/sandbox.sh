@@ -115,6 +115,22 @@ echo "omarchy-plugin-clone $*" >> "$SB/state/calls"'
   sb_stub omarchy-notification-send 'printf "notify:" >> "$SB/state/calls"; printf " [%s]" "$@" >> "$SB/state/calls"; echo >> "$SB/state/calls"'
   sb_stub omarchy-setup-security-fingerprint 'echo "omarchy-setup-security-fingerprint" >> "$SB/state/calls"'
   sb_stub curl 'exit 1'
+  # rclone: remotes live in $SB/state/rclone-remotes (one "name:" per line,
+  # empty/missing = none configured). `config` "creates" gdrive: unless
+  # NO_RCLONE_CONFIG is set (simulates the user backing out). `bisync` fails
+  # if FAIL_BISYNC is set, otherwise just logs the call.
+  sb_stub rclone '
+case "$1" in
+  listremotes) cat "$SB/state/rclone-remotes" 2>/dev/null ;;
+  version) echo "rclone v1.75.1" ;;
+  config)
+    echo "rclone config" >> "$SB/state/calls"
+    [[ -n ${NO_RCLONE_CONFIG:-} ]] || echo "gdrive:" >> "$SB/state/rclone-remotes" ;;
+  bisync)
+    echo "rclone bisync $*" >> "$SB/state/calls"
+    [[ -n ${FAIL_BISYNC:-} ]] && exit 1
+    exit 0 ;;
+esac'
   # Stands in for a real gum (installed on Omarchy), which reads the terminal
   # directly and would hang on piped answers. Echoes the typed answer, which
   # the scripts' prompt parsing accepts just like a menu choice.

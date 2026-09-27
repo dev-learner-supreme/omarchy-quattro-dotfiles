@@ -190,6 +190,7 @@ switch or an uncommitted edit in `bin/` takes effect at the next boot or update 
 .
 ├── install.sh                     # This setup script (orchestrator)
 ├── bin/egismoc-fingerprint        # EgisTec fingerprint setup/status/check → ~/.local/bin
+├── bin/drive-sync                 # Google Drive ↔ ~/GoogleDrive via rclone bisync → ~/.local/bin (opt-in)
 ├── lib/ui.sh                      # Shared prompt/log/sudo helpers
 ├── lib/dotfiles.sh                # Dotfile deployment (drift check, removals)
 ├── packages/                      # Pinned driver PKGBUILD + checksum-verified binary
@@ -197,6 +198,7 @@ switch or an uncommitted edit in `bin/` takes effect at the next boot or update 
 ├── .github/workflows/ci.yml       # ShellCheck + tests on every push
 ├── CLAUDE.md                      # Guide for coding agents (AGENTS.md is a symlink to it)
 ├── SETUP_AND_ARCHITECTURE.md      # This guide
+├── GOOGLE_DRIVE_SYNC_GUIDE.md     # Google Cloud OAuth setup + drive-sync usage
 ├── .bashrc                        # SSH socket, ~/.local/bin on PATH, Android SDK
 ├── .zshrc                         # Starship + eza aliases + zsh plugins
 ├── .config/                       # Only files that differ from Omarchy's defaults

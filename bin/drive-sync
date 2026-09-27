@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# drive-sync — Google Drive as a native local folder, via rclone bisync.
+#
+# Not a mount: rclone bisync keeps ~/GoogleDrive as real local files, synced
+# both ways with the "gdrive" rclone remote. Nothing hangs waiting on the
+# network to open a file, and it works offline between sync runs. A systemd
+# --user timer runs a sync pass every 15 minutes.
+#
+# Setup needs a Google Cloud OAuth client you create yourself — Google's
+# shared client rclone used to ship is being retired during 2026, and an
+# unpublished ("Testing") OAuth app has its login expire every 7 days, which
+# would silently break the timer a week in. See GOOGLE_DRIVE_SYNC_GUIDE.md for
+# the exact Google Cloud Console steps, including publishing the app to avoid
+# that. This script assumes you already have a client ID and secret.
+#
+# Usage:
+#   drive-sync setup [-y]   One-time: create the "gdrive" remote (interactive,
+#                            needs a browser), run the required --resync
+#                            baseline, enable the sync timer, add the folder
+#                            to Nautilus's bookmarks. Re-runnable.
+#   drive-sync sync          Run one bisync pass now. What the timer calls.
+#   drive-sync status        Read-only report: remote, folder, timer, last sync.
+#   drive-sync logs [-f]     Show (or follow) the last sync's output.
+# ==============================================================================
+set -Eeuo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+DOTFILES_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+ASSUME_YES=0
+# shellcheck source=lib/ui.sh
+source "$DOTFILES_DIR/lib/ui.sh"
+
+REMOTE_NAME="gdrive"
+LOCAL_DIR="$HOME/GoogleDrive"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/drive-sync"
+LOG_FILE="$STATE_DIR/sync.log"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+TIMER_NAME="drive-sync.timer"
+SERVICE_NAME="drive-sync.service"
+BOOKMARKS_FILE="$HOME/.config/gtk-3.0/bookmarks"
+
+# Google Docs/Sheets/Slides have no real byte size, which confuses bisync's
+# size/modtime comparison — skip them so they stay purely on the web, which is
+# where you'd open and edit them anyway. --fix-case avoids spurious conflicts
+# from Drive allowing names that differ only by case.
+COMMON_FLAGS=(--drive-skip-gdocs --fix-case --create-empty-src-dirs
+  --exclude ".DS_Store" --exclude ".~lock.*#" --exclude "*.tmp")
+
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+
+remote_configured() { rclone listremotes 2>/dev/null | grep -qx "${REMOTE_NAME}:"; }
+timer_enabled() { systemctl --user is-enabled --quiet "$TIMER_NAME" 2>/dev/null; }
+resync_marker() { echo "$STATE_DIR/resync-done"; }
+
+run_bisync() {
+  local extra=("$@")
+  mkdir -p "$STATE_DIR" "$LOCAL_DIR"
+  rclone bisync "$LOCAL_DIR" "${REMOTE_NAME}:" \
+    "${COMMON_FLAGS[@]}" "${extra[@]}" \
+    --log-file "$LOG_FILE" -v
+}
+
+# ------------------------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------------------------
+
+cmd_setup() {
+  command -v rclone &>/dev/null || fail "rclone isn't installed. It should be — check install.sh Step 1."
+
+  if ! remote_configured; then
+    log "No '$REMOTE_NAME' rclone remote yet."
+    info "This step needs your own Google Cloud OAuth client ID and secret"
+    info "(see GOOGLE_DRIVE_SYNC_GUIDE.md), and a browser to sign in."
+    if (( ASSUME_YES )) || [[ ! -t 0 ]]; then
+      fail "Run 'rclone config' yourself first (name the remote '$REMOTE_NAME', type 'drive'), then re-run 'drive-sync setup'."
+    fi
+    confirm "Run 'rclone config' now to create it?" true ||
+      fail "Run 'rclone config' yourself (remote name '$REMOTE_NAME', type 'drive'), then re-run 'drive-sync setup'."
+    rclone config
+    remote_configured || fail "Still no '$REMOTE_NAME' remote — nothing else to do until it exists."
+  else
+    info "Remote '$REMOTE_NAME' already configured."
+  fi
+
+  mkdir -p "$LOCAL_DIR" "$STATE_DIR"
+
+  if [[ ! -f "$(resync_marker)" ]]; then
+    log "First-time baseline sync (--resync). This compares Path1 (local) and"
+    log "Path2 ($REMOTE_NAME:) and does NOT delete anything on either side —"
+    log "it just establishes what 'in sync' means from here on."
+    if (( ASSUME_YES )) || confirm "Run the --resync baseline now?" true; then
+      run_bisync --resync
+      touch "$(resync_marker)"
+      info "Baseline established."
+    else
+      fail "Can't enable the sync timer before the --resync baseline runs."
+    fi
+  else
+    info "Baseline already established; leaving it alone (re-run would just repeat it)."
+  fi
+
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT_DIR/$SERVICE_NAME" <<EOF
+[Unit]
+Description=Sync ~/GoogleDrive with Google Drive (rclone bisync)
+
+[Service]
+Type=oneshot
+ExecStart=$SCRIPT_PATH sync
+EOF
+  cat > "$UNIT_DIR/$TIMER_NAME" <<EOF
+[Unit]
+Description=Run drive-sync every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$TIMER_NAME"
+  info "Sync timer enabled (every 15 minutes): systemctl --user status $TIMER_NAME"
+
+  if [[ -f "$BOOKMARKS_FILE" ]] && grep -qF "file://$LOCAL_DIR" "$BOOKMARKS_FILE"; then
+    info "Already bookmarked in Nautilus."
+  else
+    mkdir -p "$(dirname "$BOOKMARKS_FILE")"
+    printf 'file://%s Google Drive\n' "$LOCAL_DIR" >> "$BOOKMARKS_FILE"
+    info "Added to Nautilus's sidebar (Google Drive)."
+  fi
+
+  log "Done. $LOCAL_DIR now syncs with your Google Drive every 15 minutes."
+}
+
+cmd_sync() {
+  command -v rclone &>/dev/null || exit 0
+  remote_configured || exit 0
+  [[ -f "$(resync_marker)" ]] || exit 0   # setup hasn't run the baseline yet
+  if ! run_bisync --resilient --recover --max-lock 2m --max-delete 10 \
+       --conflict-resolve none; then
+    omarchy-notification-send -u critical -g 󰊶 \
+      "Google Drive sync failed" \
+      "drive-sync hit an error — see: drive-sync logs" \
+      --exec omarchy-launch-floating-terminal-with-presentation "$SCRIPT_PATH" logs || true
+    exit 1
+  fi
+}
+
+cmd_status() {
+  local ok="\e[32mok\e[0m" bad="\e[31m!!\e[0m"
+  row() { printf "  [%b] %-10s %s\n" "$1" "$2" "$3"; }
+
+  echo "Google Drive sync status"
+  if command -v rclone &>/dev/null; then row "$ok" rclone "$(rclone version 2>/dev/null | head -n1)"
+  else row "$bad" rclone "not installed"; fi
+
+  if remote_configured; then row "$ok" remote "$REMOTE_NAME: configured"
+  else row "$bad" remote "no '$REMOTE_NAME' remote — run: drive-sync setup"; fi
+
+  if [[ -d "$LOCAL_DIR" ]]; then row "$ok" folder "$LOCAL_DIR ($(du -sh "$LOCAL_DIR" 2>/dev/null | cut -f1))"
+  else row "$bad" folder "$LOCAL_DIR doesn't exist yet"; fi
+
+  if [[ -f "$(resync_marker)" ]]; then row "$ok" baseline "established"
+  else row "$bad" baseline "not run yet — run: drive-sync setup"; fi
+
+  if timer_enabled; then
+    local last
+    last="$(systemctl --user show "$SERVICE_NAME" -p ExecMainExitTimestamp --value 2>/dev/null)"
+    row "$ok" timer "every 15 min, last run: ${last:-never yet}"
+  else row "$bad" timer "not enabled — run: drive-sync setup"; fi
+}
+
+cmd_logs() {
+  [[ -f "$LOG_FILE" ]] || fail "No log yet: $LOG_FILE"
+  if [[ "${1:-}" == "-f" ]]; then tail -f "$LOG_FILE"; else tail -n 100 "$LOG_FILE"; fi
+}
+
+usage() { sed -n '18,24p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'; }
+
+main() {
+  local cmd="${1:-}"
+  (( $# )) && shift
+  local arg
+  for arg in "$@"; do
+    [[ "$arg" == "-y" || "$arg" == "--yes" ]] && ASSUME_YES=1
+  done
+
+  case "$cmd" in
+    setup)          cmd_setup ;;
+    sync)           cmd_sync ;;
+    status)         cmd_status ;;
+    logs)           cmd_logs "${1:-}" ;;
+    -h|--help|help) usage ;;
+    *)              usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"

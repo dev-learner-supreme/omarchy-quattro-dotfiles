@@ -12,7 +12,7 @@ jobs:
 
       - name: Shell syntax
         run: |
-          for f in install.sh bin/egismoc-fingerprint lib/*.sh tests/*.sh tests/lib/*.sh \
+          for f in install.sh bin/egismoc-fingerprint bin/drive-sync lib/*.sh tests/*.sh tests/lib/*.sh \
                    .config/omarchy/hooks/theme-set .config/omarchy/hooks/*/*.hook \
                    packages/libfprint-egismoc-sdcp/PKGBUILD; do
             bash -n "$f"
@@ -21,7 +21,7 @@ jobs:
       - name: ShellCheck
         run: |
           command -v shellcheck >/dev/null || sudo apt-get install -y shellcheck
-          shellcheck -x install.sh bin/egismoc-fingerprint lib/*.sh tests/*.sh tests/lib/*.sh \
+          shellcheck -x install.sh bin/egismoc-fingerprint bin/drive-sync lib/*.sh tests/*.sh tests/lib/*.sh \
             .config/omarchy/hooks/theme-set .config/omarchy/hooks/*/*.hook
 
       - name: Archived driver matches its checksum

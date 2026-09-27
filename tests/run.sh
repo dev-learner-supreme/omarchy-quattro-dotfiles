@@ -268,6 +268,7 @@ test_drive_sync_filters_exclude_dev_junk_and_this_machines_backups() {
   check "filters file exists" exists "$f"
   check "node_modules excluded at any depth" has "$f" '^- node_modules/\*\*$'
   check "git internals excluded" has "$f" '^- \.git/\*\*$'
+  check "this machine's Backups folder excluded" has "$f" '^- /Backups/\*\*$'
   check "this machine's fedora backup excluded" has "$f" '^- /fedora-backup/\*\*$'
   check "this machine's omarchy backup excluded" has "$f" '^- /omarchy-backup/\*\*$'
 }

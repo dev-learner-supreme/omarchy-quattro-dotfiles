@@ -10,3 +10,7 @@ packages/libfprint-egismoc-sdcp/src/
 packages/libfprint-egismoc-sdcp/pkg/
 packages/libfprint-egismoc-sdcp/libfprint-egismoc-sdcp/
 packages/libfprint-egismoc-sdcp/*.pkg.tar.zst
+
+# rclone bisync's own hash of bin/drive-sync-filters.txt, used to detect
+# filter changes and force a --resync. Machine-local, regenerated on each run.
+bin/drive-sync-filters.txt.md5

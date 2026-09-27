@@ -46,6 +46,7 @@
 
 # --- This machine's own migration/backup dumps (root-anchored: these are
 # top-level Drive folders, not a pattern to chase into other projects) ---
+- /Backups/**
 - /fedora-backup/**
 - /fedora latest files/**
 - /linux_migration_backup/**

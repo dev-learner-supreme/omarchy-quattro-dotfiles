@@ -42,8 +42,14 @@ changed since the last deploy (a hand edit, an Omarchy migration, an app),
   menu's *Setup > Security > Fingerprint* is already routed to it).
 - **PAM edits** (`/etc/pam.d/{sudo,polkit-1,omarchy-lock-fingerprint}`) go through
   `bin/egismoc-fingerprint` only. Fingerprint is always `sufficient`, never
-  `required`, for sudo and polkit, and a password path must remain. After any
-  PAM change, the user must confirm `sudo -k true` works in a *new* terminal
+  `required`, for polkit and the lock screen, and a password path must remain.
+  **Sudo is kept password-only on purpose** — a non-interactive `sudo` call
+  (a script, a hook, an agent) still tries `pam_fprintd.so` first, and if it
+  overlaps another fingerprint session it crashes `fprintd` via this driver's
+  `egismoc_open` reentrancy assertion (upstream, unfixed:
+  TenSeventy7/libfprint-egismoc-sdcp#13). `setup_pam()` actively strips
+  fingerprint lines from `/etc/pam.d/sudo` if it finds them. After any PAM
+  change, the user must confirm `sudo -k true` works in a *new* terminal
   before closing the old one.
 - **Don't hand-edit `~/.config/omarchy/plugins/<user>.lock/`.** It's rebuilt from
   Omarchy's stock lock screen whenever that changes, and any file that differs

@@ -47,10 +47,13 @@ the hooks in `.config/omarchy/hooks/`), so it only ever changes when you do this
 
 ## Authentication wiring
 
-PAM (sudo, polkit, the Quickshell lock screen) is configured by
+PAM (polkit, the Quickshell lock screen) is configured by
 `bin/egismoc-fingerprint`, not by this package. See [SETUP_AND_ARCHITECTURE.md](../../SETUP_AND_ARCHITECTURE.md).
 The password fallback always works: fingerprint is `sufficient`, never `required`,
-for sudo and polkit.
+for polkit. Sudo is kept password-only on purpose: a non-interactive `sudo` call
+can race a live fingerprint session and crash `fprintd` via this driver's
+`egismoc_open` reentrancy assertion (upstream, unfixed:
+[TenSeventy7/libfprint-egismoc-sdcp#13](https://github.com/TenSeventy7/libfprint-egismoc-sdcp/issues/13)).
 
 ## Caveat
 

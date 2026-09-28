@@ -50,10 +50,11 @@ test_unattended_install_on_egistec_laptop() {
   local rc=$?
   check "install exits 0" test "$rc" -eq 0
   check "SDCP driver installed from the verified archive" has "$SB/state/installed" '^libfprint-egismoc-sdcp-git$'
-  check "sudo: fingerprint, then password" has "$SB/etc/pam.d/sudo" 'sufficient pam_fprintd'
-  check "sudo: lid gate with quiet_log" has "$SB/etc/pam.d/sudo" 'quiet quiet_log /usr/bin/omarchy-hw-laptop-closed'
-  check "sudo: fingerprint lines after the header" has <(head -1 "$SB/etc/pam.d/sudo") '^#%PAM'
+  check "sudo: fingerprint kept off (driver issue #13)" lacks "$SB/etc/pam.d/sudo" 'pam_fprintd'
+  check "sudo: no lid gate (only wired alongside fingerprint)" lacks "$SB/etc/pam.d/sudo" 'omarchy-hw-laptop-closed'
+  check "sudo: header intact" has <(head -1 "$SB/etc/pam.d/sudo") '^#%PAM'
   check "sudo: password path kept" has "$SB/etc/pam.d/sudo" 'include[[:space:]]+system-auth'
+  check "polkit: fingerprint, then password" has "$SB/etc/pam.d/polkit-1" 'sufficient pam_fprintd'
   check "polkit built from the vendor copy" has "$SB/etc/pam.d/polkit-1" 'password +include +system-auth'
   check "lock screen PAM has no timeout" has "$SB/etc/pam.d/omarchy-lock-fingerprint" 'timeout=-1 max-tries=-1'
   check "driver pinned in IgnorePkg" has "$SB/etc/pacman.conf" '^IgnorePkg.*libfprint-egismoc-sdcp-git'
@@ -104,13 +105,33 @@ test_tampered_driver_is_refused() {
   check "rest of the install still ran" has "$SB/install.log" 'Setup complete'
 }
 
+# Pre-existing sudo PAM from before sudo was excluded from fingerprint (i.e. an
+# upgrade from an older install). Removing those lines is now the write
+# CORRUPT_SUDO intercepts.
+old_sudo_pam_with_fingerprint() {
+  printf '#%%PAM-1.0\nauth      [success=1 default=ignore] pam_exec.so quiet quiet_log /usr/bin/omarchy-hw-laptop-closed\nauth      sufficient pam_fprintd.so\nauth\t\tinclude\t\tsystem-auth\naccount\t\tinclude\t\tsystem-auth\nsession\t\tinclude\t\tsystem-auth\n' > "$SB/etc/pam.d/sudo"
+}
+
 test_pam_edit_that_changes_other_lines_is_rolled_back() {
   sb_fresh
   echo 1 > "$SB/state/prints"
+  old_sudo_pam_with_fingerprint
   cp "$SB/etc/pam.d/sudo" "$SB/sudo.orig"
   sb_run env CORRUPT_SUDO=1 bash "$SB/repo/install.sh" -y > "$SB/install.log" 2>&1
   check "detected" has "$SB/install.log" 'changed beyond its fingerprint lines'
   check "sudo restored exactly" same "$SB/sudo.orig" "$SB/etc/pam.d/sudo"
+}
+
+test_upgrade_removes_fingerprint_from_existing_sudo() {
+  sb_fresh
+  echo 1 > "$SB/state/prints"
+  old_sudo_pam_with_fingerprint
+  sb_run bash "$SB/repo/install.sh" -y > "$SB/install.log" 2>&1
+  check "removal logged" has "$SB/install.log" 'Removing fingerprint from sudo'
+  check "sudo: fingerprint removed" lacks "$SB/etc/pam.d/sudo" 'pam_fprintd'
+  check "sudo: lid gate removed" lacks "$SB/etc/pam.d/sudo" 'omarchy-hw-laptop-closed'
+  check "sudo: password path kept" has "$SB/etc/pam.d/sudo" 'include[[:space:]]+system-auth'
+  check "polkit still got fingerprint" has "$SB/etc/pam.d/polkit-1" 'pam_fprintd'
 }
 
 test_failed_pam_write_is_rolled_back() {
@@ -129,8 +150,9 @@ test_interactive_first_setup_enrolls_then_wires_pam() {
   printf '\n' | sb_run_tty "$(FP)" setup > "$SB/setup.log" 2>&1
   check "finger enrolled" test "$(cat "$SB/state/prints")" -eq 1
   check "verified before PAM" has "$SB/setup.log" 'verify-match'
-  check "sudo re-checked through the new stack" has "$SB/setup.log" 'sudo works with fingerprint'
-  check "sudo has fingerprint" has "$SB/etc/pam.d/sudo" 'pam_fprintd'
+  check "sudo re-checked through the new stack" has "$SB/setup.log" 'sudo works'
+  check "sudo stays password-only (driver issue #13)" lacks "$SB/etc/pam.d/sudo" 'pam_fprintd'
+  check "polkit has fingerprint" has "$SB/etc/pam.d/polkit-1" 'pam_fprintd'
 }
 
 test_failed_sudo_recheck_offers_restore() {

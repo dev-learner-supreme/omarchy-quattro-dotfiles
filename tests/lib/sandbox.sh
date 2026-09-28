@@ -66,7 +66,8 @@ esac
 if [[ -n ${CORRUPT_SUDO:-} && $1 == cp && $3 == */pam.d/sudo && ! -e $SB/state/corrupted ]]; then
   "$@"; sed -i "/^account/d" "$3"; touch "$SB/state/corrupted"; exit
 fi
-# Fails the fingerprint insert into polkit-1, i.e. after sudo was already edited.
+# Fails the fingerprint insert into polkit-1, i.e. after sudo PAM was already
+# touched (removal, on an upgrade, or left alone on a fresh install).
 if [[ -n ${FAIL_ON_POLKIT_WRITE:-} && $1 == cp && $3 == */pam.d/polkit-1 && $2 != */usr/lib/pam.d/* ]]; then
   echo "sudo: simulated failure" >&2; exit 1
 fi

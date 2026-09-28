@@ -192,9 +192,10 @@ install_driver() {
 }
 
 # ------------------------------------------------------------------------------
-# PAM — Omarchy's fingerprint lines for sudo and polkit (plus quiet_log on the
-# lid gate), and no fprintd timeout on the lock screen. Backed up first;
-# rolled back on failure.
+# PAM — Omarchy's fingerprint line for polkit (plus quiet_log on the lid gate),
+# no fprintd timeout on the lock screen, and fingerprint explicitly kept off
+# sudo (driver issue #13 — see setup_pam). Backed up first; rolled back on
+# failure.
 # ------------------------------------------------------------------------------
 
 backup_pam_files() {
@@ -269,6 +270,17 @@ pam_insert_before() {
   rm -f "$tmp"
 }
 
+# Strips every line matching the ERE REGEX out of FILE, if any match.
+pam_remove_matching() {
+  local file="$1" regex="$2" tmp
+  [[ -f "$file" ]] || return 0
+  grep -qE "$regex" "$file" || return 0
+  tmp="$(mktemp)"
+  grep -vE "$regex" "$file" > "$tmp"
+  sudo cp "$tmp" "$file"   # overwrites in place: keeps root ownership and mode
+  rm -f "$tmp"
+}
+
 setup_pam() {
   backup_pam_files
   PAM_EDIT_ACTIVE=1
@@ -299,9 +311,22 @@ EOF
     fi
   fi
 
+  # sudo is deliberately excluded from fingerprint auth: a non-interactive
+  # sudo call (a script, a hook, a coding agent) still tries pam_fprintd.so
+  # before falling back to the password, and if it overlaps a fingerprint
+  # session started elsewhere (the lock screen, polkit, a manual
+  # fprintd-verify) it hits this driver's egismoc_open reentrancy assertion
+  # (task_ssm != NULL) and crashes fprintd. Upstream, unfixed:
+  # https://github.com/TenSeventy7/libfprint-egismoc-sdcp/issues/13
+  # polkit and the lock screen are always interactive, so they keep it.
+  if grep -qE "$FP_LINES_RE" /etc/pam.d/sudo 2>/dev/null; then
+    info "Removing fingerprint from sudo (non-interactive sudo can crash fprintd; see driver issue #13)..."
+    pam_remove_matching /etc/pam.d/sudo "$FP_LINES_RE"
+  fi
+
   # Fingerprint first, password as the fallback: `sufficient` never removes the
   # password path, it only lets a matching finger skip it.
-  for pam_file in /etc/pam.d/sudo /etc/pam.d/polkit-1; do
+  for pam_file in /etc/pam.d/polkit-1; do
     [[ -f "$pam_file" ]] || continue
     if ! grep -q 'pam_fprintd.so' "$pam_file"; then
       info "Enabling fingerprint for $(basename "$pam_file")..."
@@ -357,13 +382,13 @@ verify_sudo_pam() {
     warn "Pre-edit PAM backups: $PAM_BACKUP_DIR"
     return 0
   fi
-  info "Checking sudo through the new PAM stack — touch the sensor or type your password..."
+  info "Checking sudo still works after the PAM changes — type your password..."
   if sudo -k true; then
-    info "sudo works with fingerprint (password still works as the fallback)."
+    info "sudo works (password confirmed; fingerprint stays on polkit and the lock screen, not sudo)."
     return 0
   elif confirm "sudo re-authentication failed. Restore the pre-edit PAM files?" true; then
     restore_pam_backup
-    warn "Fingerprint authentication was rolled back; the sensor itself is still enrolled."
+    warn "PAM changes were rolled back; the sensor itself is still enrolled."
   else
     warn "Left in place. Do NOT close this terminal until sudo works; backups: $PAM_BACKUP_DIR"
   fi
@@ -516,7 +541,7 @@ cmd_setup() {
   setup_pam
   verify_sudo_pam || exit 1
   setup_lock_plugin
-  log "Fingerprint ready for sudo, admin prompts, and the lock screen (Super + Ctrl + L). Your password still works everywhere."
+  log "Fingerprint ready for admin prompts and the lock screen (Super + Ctrl + L). Your password still works everywhere; sudo stays password-only on purpose (driver issue #13)."
 }
 
 cmd_status() {
@@ -541,11 +566,15 @@ cmd_status() {
   if (( prints > 0 )); then row "$ok" enrolled "$prints print(s) for $CURRENT_USER"
   else row "$bad" enrolled "no prints for $CURRENT_USER"; fi
 
-  local name
-  for name in sudo polkit-1; do
-    if grep -q 'pam_fprintd.so' "/etc/pam.d/$name" 2>/dev/null; then row "$ok" "pam $name" "fingerprint or password"
-    else row "$bad" "pam $name" "fingerprint not enabled"; fi
-  done
+  # sudo is intentionally kept password-only: a non-interactive sudo call
+  # can crash fprintd on this driver (issue #13), so "ok" here means absent.
+  if grep -q 'pam_fprintd.so' /etc/pam.d/sudo 2>/dev/null; then
+    row "$bad" "pam sudo" "fingerprint enabled — should be password-only (driver issue #13)"
+  else
+    row "$ok" "pam sudo" "password-only, on purpose"
+  fi
+  if grep -q 'pam_fprintd.so' /etc/pam.d/polkit-1 2>/dev/null; then row "$ok" "pam polkit-1" "fingerprint or password"
+  else row "$bad" "pam polkit-1" "fingerprint not enabled"; fi
   if grep -q 'timeout=-1' /etc/pam.d/omarchy-lock-fingerprint 2>/dev/null; then row "$ok" "pam lock" "no fprintd timeout"
   else row "$bad" "pam lock" "missing or still times out"; fi
 

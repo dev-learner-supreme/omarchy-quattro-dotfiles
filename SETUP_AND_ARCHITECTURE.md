@@ -24,7 +24,7 @@ Run it from wherever the repo lives, and leave the repo there afterwards — see
 graph TD
   A["Hardware Layer"] --> B["EgisTec MOC Fingerprint<br/>1c7a:0584"]
   A --> C["Audio (WirePlumber 0.5)<br/>HP 1500 > SPK 1200 > HDMI 600"]
-  D["Authentication Layer"] --> E["PAM: sudo + polkit + lock screen<br/>auth sufficient pam_fprintd.so<br/>+ clamshell gate"]
+  D["Authentication Layer"] --> E["PAM: polkit + lock screen<br/>auth sufficient pam_fprintd.so<br/>+ clamshell gate<br/>(sudo kept password-only, driver #13)"]
   D --> F["SSH Agent<br/>systemd ssh-agent.socket<br/>AddKeysToAgent yes"]
   G["Desktop Layer"] --> H["Hyprland Lua DSL<br/>F7 hyprmoncfg · F8 lock<br/>Super+Shift+S screenshot"]
   G --> I["Omarchy Shell Plugins<br/>arun.lock (fingerprint retry clone)<br/>bar add-ons: screen-time · hyprmoncfg · bluetooth-audio"]
@@ -94,10 +94,14 @@ overridden to run. On any other sensor it hands off to Omarchy's wizard.
    `/var/cache/pacman/pkg/` and `~/.local/share/packages/` for offline
    reinstallation.
 4. **PAM Integration** (only after a print is enrolled *and* verified):
-   `auth sufficient pam_fprintd.so` in sudo/polkit/lock, with Omarchy's
+   `auth sufficient pam_fprintd.so` in polkit/lock, with Omarchy's
    clamshell gate (`omarchy-hw-laptop-closed`, plus `quiet_log`) that skips
    fingerprint when the lid is closed. The lock screen's PAM has no fprintd
-   timeout, to avoid a driver assertion loop when it re-arms.
+   timeout, to avoid a driver assertion loop when it re-arms. **Sudo is kept
+   password-only**: `setup_pam()` actively strips any fingerprint lines from
+   `/etc/pam.d/sudo`, because a non-interactive sudo call (script, hook, agent)
+   can race a live fingerprint session and trip the same driver assertion
+   (unfixed upstream: TenSeventy7/libfprint-egismoc-sdcp#13).
 5. **Lock screen**: `omarchy plugin clone omarchy.lock` → `<user>.lock`, with the
    fingerprint retry raised from 250ms to 1500ms (the sensor needs it to reset).
 6. **Health check**: the `post-update` and `post-boot` hooks run
